@@ -2180,6 +2180,12 @@ natsuGoBtn.MouseButton1Click:Connect(function()
         return
     end
 
+    if not NatsuState.SelectedEggUid then
+        natsuStatus.Text = "Selecione um ovo primeiro"
+        natsuStatus.TextColor3 = Color3.fromRGB(255, 190, 80)
+        return
+    end
+
     if isStealNightBlocked and isStealNightBlocked() then
         natsuStatus.Text = "Noite - aguarde o dia"
         natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
@@ -2187,23 +2193,149 @@ natsuGoBtn.MouseButton1Click:Connect(function()
     end
 
     NatsuState.Running = true
-    Config.StealMode = NatsuState.Modo
-    Config.AutoSteal = true
+    local entry = NatsuState.EggsCache[NatsuState.SelectedEggUid]
+    local nome = entry and entry.info.eggName or "Ovo"
+    local targetUid = NatsuState.SelectedEggUid
 
-    local nome
-    if NatsuState.SelectedEggUid then
-        local entry = NatsuState.EggsCache[NatsuState.SelectedEggUid]
-        nome = entry and entry.info.eggName or "Ovo"
-    else
-        nome = "Procurando ovo"
-    end
+    task.spawn(function()
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not root or not hum then
+            natsuStatus.Text = "Sem personagem"
+            NatsuState.Running = false
+            return
+        end
 
-    natsuStatus.Text = "Executando: " .. nome
-    natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
+        -- ETAPA 1: Vai pra galinha (Forest primer)
+        natsuStatus.Text = "Indo na galinha..."
+        natsuStatus.TextColor3 = Color3.fromRGB(200, 180, 255)
 
-    if icRunner then
-        icRunner:setEnabled(true)
-    end
+        local forestEgg = nil
+        local GuardAreas = workspace:FindFirstChild("__OBJECTS")
+            and workspace.__OBJECTS:FindFirstChild("Areas")
+            and workspace.__OBJECTS.Areas:FindFirstChild("GuardAreas")
+        local forestGuard = GuardAreas and GuardAreas:FindFirstChild("Forest") and GuardAreas.Forest:FindFirstChild("Guard")
+        local guardHrp = forestGuard and forestGuard:FindFirstChild("HumanoidRootPart")
+
+        if not guardHrp then
+            natsuStatus.Text = "Galinha nao encontrada"
+            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+            NatsuState.Running = false
+            return
+        end
+
+        -- Pega um ovo qualquer do Forest pra "isca"
+        local snapshot = NatsuEggCmds.ReadFieldEggs()
+        if snapshot and snapshot.Records then
+            for _, rec in pairs(snapshot.Records) do
+                if rec.AreaId == "Forest" and rec.State == "Slot" and rec.BottomCFrame then
+                    forestEgg = rec
+                    break
+                end
+            end
+        end
+
+        if not forestEgg then
+            natsuStatus.Text = "Sem isca no Forest"
+            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+            NatsuState.Running = false
+            return
+        end
+
+        -- Teleporta pra frente da galinha
+        local frontPos = guardHrp.Position + (guardHrp.CFrame.LookVector * 2)
+        local baitCFrame = CFrame.lookAt(
+            Vector3.new(frontPos.X, guardHrp.Position.Y + 3, frontPos.Z),
+            guardHrp.Position
+        )
+
+        local oldSpeed = Config.TweenSpeedMultiplier
+        Config.TweenSpeedMultiplier = 100
+        TweenMoveTo(root, hum, baitCFrame, function() return not NatsuState.Running end, false)
+        Config.TweenSpeedMultiplier = oldSpeed
+
+        if not NatsuState.Running then return end
+
+        -- ETAPA 2: Espera a galinha bater (ragdoll)
+        natsuStatus.Text = "Esperando a galinha bater..."
+        natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
+
+        local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+        local waited = 0
+        while NatsuState.Running and waited < 8 do
+            local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+            if tEnd > tEnd0 + 0.5 then
+                break
+            end
+            task.wait(0.1)
+            waited = waited + 0.1
+        end
+
+        if not NatsuState.Running then return end
+
+        if waited >= 8 then
+            natsuStatus.Text = "Galinha nao bateu"
+            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+            NatsuState.Running = false
+            return
+        end
+
+        -- ETAPA 3: Teleporta pro ovo ESCOLHIDO
+        natsuStatus.Text = "Ragdoll! Indo pro ovo..."
+        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
+
+        local rec = NatsuEggCmds.ReadFieldEgg(targetUid)
+        if not rec or typeof(rec.BottomCFrame) ~= "CFrame" then
+            natsuStatus.Text = "Ovo escolhido sumiu"
+            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+            NatsuState.Running = false
+            return
+        end
+
+        local oldSpeed2 = Config.TweenSpeedMultiplier
+        Config.TweenSpeedMultiplier = 100
+        TweenMoveTo(root, hum, CFrame.new(rec.BottomCFrame.Position + Vector3.new(0, 3.5, 0)),
+            function() return not NatsuState.Running end, false)
+        Config.TweenSpeedMultiplier = oldSpeed2
+
+        if not NatsuState.Running then return end
+
+        -- ETAPA 4: Pega o ovo
+        local slotKey = getgenv().computeFirstAreaSlotKey and getgenv().computeFirstAreaSlotKey(rec.Uid, rec.AreaId, rec.NestId)
+        local pego = false
+        for _ = 1, 10 do
+            if not NatsuState.Running then return end
+            local ok, res = pcall(icRequestFieldEggCarry, rec.Uid, slotKey)
+            if ok and res == true then
+                pego = true
+                break
+            end
+            task.wait(0.15)
+        end
+
+        if not pego then
+            natsuStatus.Text = "Nao consegui pegar"
+            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+            NatsuState.Running = false
+            return
+        end
+
+        -- ETAPA 5: Volta pra base
+        natsuStatus.Text = "Pego! Voltando pra base..."
+        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
+
+        local basePos = Vector3.new(545, 71, -365)
+        local safeCFrame = CFrame.new(basePos + Vector3.new(0, 3.5, 0))
+        local oldSpeed3 = Config.TweenSpeedMultiplier
+        Config.TweenSpeedMultiplier = 100
+        TweenMoveTo(root, hum, safeCFrame, function() return not NatsuState.Running end, false)
+        Config.TweenSpeedMultiplier = oldSpeed3
+
+        natsuStatus.Text = "Na base: " .. nome
+        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
+        NatsuState.Running = false
+    end)
 end)
 
 natsuStopBtn.MouseButton1Click:Connect(function()
