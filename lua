@@ -1703,21 +1703,33 @@ local function NatsuGetEggInfo(record)
     }
 end
 
+local RARITY_RANK = {
+    Common = 1, Uncommon = 2, Rare = 3, Epic = 4,
+    Legendary = 5, Mythic = 6, Cosmic = 7, Secret = 8,
+    Eternal = 9, Divine = 10,
+}
+
 local function NatsuRefreshCache()
     local snapshot = NatsuEggCmds.ReadFieldEggs()
     local cache = {}
-    local order = {}
+    local orderList = {}
     if snapshot and snapshot.Records then
         for _, record in pairs(snapshot.Records) do
             if record.State == "Slot" or record.State == "Dropped" then
                 local info = NatsuGetEggInfo(record)
-                cache[record.Uid] = { record = record, info = info }
-                table.insert(order, record.Uid)
+                local rank = RARITY_RANK[info.rarityName] or 0
+                cache[record.Uid] = { record = record, info = info, rank = rank }
+                table.insert(orderList, record.Uid)
             end
         end
     end
+    table.sort(orderList, function(a, b)
+        local ra = cache[a] and cache[a].rank or 0
+        local rb = cache[b] and cache[b].rank or 0
+        return ra > rb
+    end)
     NatsuState.EggsCache = cache
-    NatsuState.EggOrder = order
+    NatsuState.EggOrder = orderList
 end
 
 local natsuGui = Instance.new("ScreenGui")
@@ -1962,9 +1974,14 @@ local function natsuClearList()
     end
 end
 
-local function natsuRenderList()
-    natsuClearList()
+local lastRenderSignature = ""
+
+local function natsuRenderList(force)
     local uids = NatsuState.EggOrder
+    local sig = table.concat(uids, ",")
+    if not force and sig == lastRenderSignature then return end
+    lastRenderSignature = sig
+    natsuClearList()
     natsuEggsTitle.Text = "Ovos no campo (" .. #uids .. ")"
 
     if #uids == 0 then
@@ -2175,22 +2192,60 @@ natsuGoBtn.MouseButton1Click:Connect(function()
         return
     end
 
-    Config.StealMode = NatsuState.Modo
-    Config.AutoSteal = true
-
     NatsuState.Running = true
     local entry = NatsuState.EggsCache[NatsuState.SelectedEggUid]
     local nome = entry and entry.info.eggName or "Ovo"
+    natsuStatus.Text = "Roubando: " .. nome
+    natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
 
-    if NatsuState.Modo == "Instant" then
-        icRunner:setEnabled(true)
-        natsuStatus.Text = "Executando (Instant): " .. nome
-        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
-    else
-        icRunner:setEnabled(true)
-        natsuStatus.Text = "Executando (Tween): " .. nome
-        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
-    end
+    task.spawn(function()
+        local uid = NatsuState.SelectedEggUid
+        local rec = NatsuEggCmds.ReadFieldEgg(uid)
+        if not rec or typeof(rec.BottomCFrame) ~= "CFrame" then
+            natsuStatus.Text = "Ovo sumiu do campo"
+            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+            NatsuState.Running = false
+            return
+        end
+
+        local char = LocalPlayer.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not root or not hum then
+            natsuStatus.Text = "Sem personagem"
+            NatsuState.Running = false
+            return
+        end
+
+        local oldSpeed = Config.TweenSpeedMultiplier
+        Config.TweenSpeedMultiplier = (NatsuState.Modo == "Instant") and 100 or 40
+        TweenMoveTo(root, hum, CFrame.new(rec.BottomCFrame.Position + Vector3.new(0, 3.5, 0)),
+            function() return not NatsuState.Running end, false)
+        Config.TweenSpeedMultiplier = oldSpeed
+
+        if not NatsuState.Running then return end
+
+        local slotKey = getgenv().computeFirstAreaSlotKey and getgenv().computeFirstAreaSlotKey(rec.Uid, rec.AreaId, rec.NestId)
+        local pego = false
+        for _ = 1, 10 do
+            if not NatsuState.Running then return end
+            local ok, res = pcall(icRequestFieldEggCarry, rec.Uid, slotKey)
+            if ok and res == true then
+                pego = true
+                break
+            end
+            task.wait(0.15)
+        end
+
+        if pego then
+            natsuStatus.Text = "Pego: " .. nome
+            natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
+        else
+            natsuStatus.Text = "Nao consegui pegar"
+            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+        end
+        NatsuState.Running = false
+    end)
 end)
 
 natsuStopBtn.MouseButton1Click:Connect(function()
@@ -2242,15 +2297,25 @@ natsuRefreshBtn.MouseButton1Click:Connect(function()
     natsuStatus.TextColor3 = Color3.fromRGB(200, 180, 255)
 end)
 
+local refreshQueued = false
+local function queueRefresh()
+    if refreshQueued then return end
+    refreshQueued = true
+    task.delay(1.5, function()
+        refreshQueued = false
+        pcall(natsuFullRefresh)
+    end)
+end
+
 pcall(function()
-    NatsuEggCmds.FieldShifted:Connect(function() natsuFullRefresh() end)
-    NatsuEggCmds.FieldGone:Connect(function() natsuFullRefresh() end)
-    NatsuEggCmds.FieldRefreshed:Connect(function() natsuFullRefresh() end)
+    NatsuEggCmds.FieldShifted:Connect(queueRefresh)
+    NatsuEggCmds.FieldGone:Connect(queueRefresh)
+    NatsuEggCmds.FieldRefreshed:Connect(queueRefresh)
 end)
 
 task.spawn(function()
     while true do
-        task.wait(2)
+        task.wait(5)
         pcall(natsuFullRefresh)
     end
 end)
