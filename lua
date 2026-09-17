@@ -20,7 +20,7 @@ local Config = {
     StealMode = "Tween",
     StealNamesFilter = {"None"},
     StealMinValue = 0,
-    TweenSpeedMultiplier = 40,
+    TweenSpeedMultiplier = 30,
     AntiGuardKnockback = true,
     IsStealing = false,
     IsParasiteProcessing = false,
@@ -2180,12 +2180,6 @@ natsuGoBtn.MouseButton1Click:Connect(function()
         return
     end
 
-    if not NatsuState.SelectedEggUid then
-        natsuStatus.Text = "Selecione um ovo primeiro"
-        natsuStatus.TextColor3 = Color3.fromRGB(255, 190, 80)
-        return
-    end
-
     if isStealNightBlocked and isStealNightBlocked() then
         natsuStatus.Text = "Noite - aguarde o dia"
         natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
@@ -2193,72 +2187,23 @@ natsuGoBtn.MouseButton1Click:Connect(function()
     end
 
     NatsuState.Running = true
-    local entry = NatsuState.EggsCache[NatsuState.SelectedEggUid]
-    local nome = entry and entry.info.eggName or "Ovo"
-    natsuStatus.Text = "Roubando: " .. nome
+    Config.StealMode = NatsuState.Modo
+    Config.AutoSteal = true
+
+    local nome
+    if NatsuState.SelectedEggUid then
+        local entry = NatsuState.EggsCache[NatsuState.SelectedEggUid]
+        nome = entry and entry.info.eggName or "Ovo"
+    else
+        nome = "Procurando ovo"
+    end
+
+    natsuStatus.Text = "Executando: " .. nome
     natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
 
-    task.spawn(function()
-        local uid = NatsuState.SelectedEggUid
-        local rec = NatsuEggCmds.ReadFieldEgg(uid)
-        if not rec or typeof(rec.BottomCFrame) ~= "CFrame" then
-            natsuStatus.Text = "Ovo sumiu do campo"
-            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
-            NatsuState.Running = false
-            return
-        end
-
-        local char = LocalPlayer.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not root or not hum then
-            natsuStatus.Text = "Sem personagem"
-            NatsuState.Running = false
-            return
-        end
-
-        local oldSpeed = Config.TweenSpeedMultiplier
-        Config.TweenSpeedMultiplier = (NatsuState.Modo == "Instant") and 100 or 40
-        TweenMoveTo(root, hum, CFrame.new(rec.BottomCFrame.Position + Vector3.new(0, 3.5, 0)),
-            function() return not NatsuState.Running end, false)
-        Config.TweenSpeedMultiplier = oldSpeed
-
-        if not NatsuState.Running then return end
-
-        local slotKey = getgenv().computeFirstAreaSlotKey and getgenv().computeFirstAreaSlotKey(rec.Uid, rec.AreaId, rec.NestId)
-        local pego = false
-        for _ = 1, 10 do
-            if not NatsuState.Running then return end
-            local ok, res = pcall(icRequestFieldEggCarry, rec.Uid, slotKey)
-            if ok and res == true then
-                pego = true
-                break
-            end
-            task.wait(0.15)
-        end
-
-                if pego then
-            natsuStatus.Text = "Pego! Voltando pra base..."
-            natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
-        else
-            natsuStatus.Text = "Nao consegui pegar"
-            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
-            NatsuState.Running = false
-            return
-        end
-
-        -- Volta pra safezone
-        local basePos = Vector3.new(545, 71, -365)
-        local safeCFrame = CFrame.new(basePos + Vector3.new(0, 3.5, 0))
-        local oldSpeed2 = Config.TweenSpeedMultiplier
-        Config.TweenSpeedMultiplier = (NatsuState.Modo == "Instant") and 100 or 40
-        TweenMoveTo(root, hum, safeCFrame, function() return not NatsuState.Running end, false)
-        Config.TweenSpeedMultiplier = oldSpeed2
-
-        natsuStatus.Text = "Na base: " .. nome
-        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
-        NatsuState.Running = false
-    end)
+    if icRunner then
+        icRunner:setEnabled(true)
+    end
 end)
 
 natsuStopBtn.MouseButton1Click:Connect(function()
