@@ -2237,13 +2237,26 @@ natsuGoBtn.MouseButton1Click:Connect(function()
             task.wait(0.15)
         end
 
-        if pego then
-            natsuStatus.Text = "Pego: " .. nome
+                if pego then
+            natsuStatus.Text = "Pego! Voltando pra base..."
             natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
         else
             natsuStatus.Text = "Nao consegui pegar"
             natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+            NatsuState.Running = false
+            return
         end
+
+        -- Volta pra safezone
+        local basePos = Vector3.new(545, 71, -365)
+        local safeCFrame = CFrame.new(basePos + Vector3.new(0, 3.5, 0))
+        local oldSpeed2 = Config.TweenSpeedMultiplier
+        Config.TweenSpeedMultiplier = (NatsuState.Modo == "Instant") and 100 or 40
+        TweenMoveTo(root, hum, safeCFrame, function() return not NatsuState.Running end, false)
+        Config.TweenSpeedMultiplier = oldSpeed2
+
+        natsuStatus.Text = "Na base: " .. nome
+        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
         NatsuState.Running = false
     end)
 end)
