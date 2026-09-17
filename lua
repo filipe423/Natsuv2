@@ -2262,23 +2262,57 @@ natsuStatus.Text = "Pegando isca..."
 natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
 
 local slotKeyForest = getgenv().computeFirstAreaSlotKey and getgenv().computeFirstAreaSlotKey(forestEgg.Uid, forestEgg.AreaId, forestEgg.NestId)
+local pegouIsca = false
 for _ = 1, 15 do
     if not NatsuState.Running then return end
     local ok, res = pcall(icRequestFieldEggCarry, forestEgg.Uid, slotKeyForest)
     if ok and res == true then
+        pegouIsca = true
         break
     end
     task.wait(0.2)
 end
 
--- ETAPA 3: Larga a isca imediatamente
-natsuStatus.Text = "Largando isca..."
-natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
+if not pegouIsca then
+    natsuStatus.Text = "Nao peguei a isca"
+    natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+    NatsuState.Running = false
+    return
+end
+
+-- ETAPA 3: Chama a remote da galinha (força o strike)
+natsuStatus.Text = "Provocando a galinha..."
+natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
 pcall(function()
-    local EggCmds = require(ReplicatedStorage.Client.EggState)
-    EggCmds.RequestDropHeldAreaEgg()
+    local strikeRemote = ReplicatedStorage:FindFirstChild("Packages")
+        and ReplicatedStorage.Packages:FindFirstChild("Networking")
+        and ReplicatedStorage.Packages.Networking:FindFirstChild("RE/GuardPatrol/ForestStrike")
+    if strikeRemote and guardHrp then
+        strikeRemote:FireServer({
+            EggUid = forestEgg.Uid,
+            GuardCFrame = guardHrp.CFrame
+        })
+    end
 end)
-task.wait(0.3)
+
+-- ETAPA 4: Espera o ragdoll ativar (máximo 5s)
+natsuStatus.Text = "Esperando o ragdoll..."
+natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
+
+local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+local waited = 0
+while NatsuState.Running and waited < 5 do
+    local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    if tEnd > tEnd0 + 0.3 then
+        break
+    end
+    task.wait(0.15)
+    waited = waited + 0.15
+end
+
+if not NatsuState.Running then return end
+
+-- ETAPA 5: Ragdoll ativo — vai pro ovo escolhido
 
         -- ETAPA 4: Teleporta pro ovo escolhido
         natsuStatus.Text = "Indo pro ovo escolhido..."
