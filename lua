@@ -2251,7 +2251,7 @@ natsuGoBtn.MouseButton1Click:Connect(function()
         )
 
         local oldSpeed = Config.TweenSpeedMultiplier
-        Config.TweenSpeedMultiplier = 30  -- velocidade média (300 studs/s)
+        Config.TweenSpeedMultiplier = 50  -- velocidade média (500 studs/s)
         TweenMoveTo(root, hum, baitCFrame, function() return not NatsuState.Running end, false)
         Config.TweenSpeedMultiplier = oldSpeed
 
@@ -2272,19 +2272,19 @@ natsuGoBtn.MouseButton1Click:Connect(function()
         end
 
         -- ETAPA 3: Espera a galinha bater (ragdoll)
-        natsuStatus.Text = "Esperando a galinha bater..."
-        natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
+natsuStatus.Text = "Esperando a galinha bater..."
+natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
 
-        local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
-        local waited = 0
-        while NatsuState.Running and waited < 10 do
-            local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
-            if tEnd > tEnd0 + 0.5 then
-                break
-            end
-            task.wait(0.1)
-            waited = waited + 0.1
-        end
+local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+local waited = 0
+while NatsuState.Running and waited < 10 do
+    local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    if tEnd > tEnd0 + 0.5 then
+        break
+    end
+    task.wait(0.25)  -- ← era 0.1, agora 0.25 (menos CPU)
+    waited = waited + 0.25
+				end
 
         if not NatsuState.Running then return end
 
@@ -2423,10 +2423,12 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    task.wait(1)
-    pcall(function() NatsuEggCmds.RequestAreaEggSnapshot() end)
-    task.wait(0.5)
-    natsuFullRefresh()
+    while true do
+        task.wait(5)
+        if not NatsuState.Running then   -- ← não atualiza durante o roubo
+            pcall(natsuFullRefresh)
+        end
+    end
 end)
 
 print("[Natsu Hub] Carregado com sucesso!")
