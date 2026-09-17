@@ -2258,40 +2258,27 @@ natsuGoBtn.MouseButton1Click:Connect(function()
         if not NatsuState.Running then return end
 
         -- ETAPA 2: Pega o ovo da galinha (isca)
-        natsuStatus.Text = "Pegando isca..."
-        natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
-
-        local slotKeyForest = getgenv().computeFirstAreaSlotKey and getgenv().computeFirstAreaSlotKey(forestEgg.Uid, forestEgg.AreaId, forestEgg.NestId)
-        for _ = 1, 15 do
-            if not NatsuState.Running then return end
-            local ok, res = pcall(icRequestFieldEggCarry, forestEgg.Uid, slotKeyForest)
-            if ok and res == true then
-                break
-            end
-            task.wait(0.2)
-        end
-
-        -- ETAPA 3: Espera a galinha bater (ragdoll)
-natsuStatus.Text = "Esperando a galinha bater..."
+natsuStatus.Text = "Pegando isca..."
 natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
 
-local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
-local waited = 0
-while NatsuState.Running and waited < 10 do
-    local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
-    if tEnd > tEnd0 + 0.5 then
+local slotKeyForest = getgenv().computeFirstAreaSlotKey and getgenv().computeFirstAreaSlotKey(forestEgg.Uid, forestEgg.AreaId, forestEgg.NestId)
+for _ = 1, 15 do
+    if not NatsuState.Running then return end
+    local ok, res = pcall(icRequestFieldEggCarry, forestEgg.Uid, slotKeyForest)
+    if ok and res == true then
         break
     end
-    task.wait(0.25)  -- ← era 0.1, agora 0.25 (menos CPU)
-    waited = waited + 0.25
-				end
+    task.wait(0.2)
+end
 
-        if not NatsuState.Running then return end
-
-        if waited >= 10 then
-            natsuStatus.Text = "Galinha nao bateu, tentando mesmo assim"
-            natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
-        end
+-- ETAPA 3: Larga a isca imediatamente
+natsuStatus.Text = "Largando isca..."
+natsuStatus.TextColor3 = Color3.fromRGB(255, 200, 80)
+pcall(function()
+    local EggCmds = require(ReplicatedStorage.Client.EggState)
+    EggCmds.RequestDropHeldAreaEgg()
+end)
+task.wait(0.3)
 
         -- ETAPA 4: Teleporta pro ovo escolhido
         natsuStatus.Text = "Indo pro ovo escolhido..."
