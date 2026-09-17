@@ -2327,15 +2327,22 @@ while NatsuState.Running and waited < 10 do
         end
 
         if not pego then
-            natsuStatus.Text = "Nao consegui pegar"
-            natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
-            NatsuState.Running = false
-            return
-        end
+    natsuStatus.Text = "Nao consegui pegar"
+    natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+    NatsuState.Running = false
+    return
+end
 
-        -- ETAPA 6: Volta pra base
-        natsuStatus.Text = "Pego! Voltando pra base..."
-        natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
+-- ETAPA 5.5: Espera 2 segundos no ovo
+natsuStatus.Text = "Aguardando 2s no ovo..."
+natsuStatus.TextColor3 = Color3.fromRGB(255, 220, 80)
+task.wait(2)
+
+if not NatsuState.Running then return end
+
+-- ETAPA 6: Volta pra base
+natsuStatus.Text = "Pego! Voltando pra base..."
+natsuStatus.TextColor3 = Color3.fromRGB(60, 230, 140)
 
         local basePos = Vector3.new(545, 71, -365)
         local safeCFrame = CFrame.new(basePos + Vector3.new(0, 3.5, 0))
