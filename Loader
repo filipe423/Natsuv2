@@ -1366,15 +1366,16 @@ if not ragdollOk then
     return
 end
 
-    -- 🔥 TELEPORTA E FORÇA POSIÇÃO (ragdoll não puxa de volta)
-    local teleportConn
-    teleportConn = RunService.Heartbeat:Connect(function()
-        if not self.enabled or self.destroyed or self.phase ~= "hunting" then
-            if teleportConn then teleportConn:Disconnect() end
+        -- 1) Força posição por 0.6s só pra segurar no ovo (ragdoll não puxa)
+    local holdConn
+    local holdUntil = os.clock() + 0.6
+    holdConn = RunService.Heartbeat:Connect(function()
+        if not self.enabled or self.destroyed then
+            if holdConn then holdConn:Disconnect() end
             return
         end
-        if self.carryActive then
-            if teleportConn then teleportConn:Disconnect() end
+        if os.clock() >= holdUntil then
+            if holdConn then holdConn:Disconnect() end
             return
         end
         if self.activeTarget and self.activeTarget.BottomCFrame then
@@ -1385,49 +1386,70 @@ end
                     r.AssemblyLinearVelocity = Vector3.zero
                     r.AssemblyAngularVelocity = Vector3.zero
                     r.CFrame = d
+                end)
+            end
+        end
+    end)
+
+    -- 2) Espera 0.6s e para de forçar
+    task.wait(0.6)
+    if holdConn then holdConn:Disconnect() end
+    if not self.enabled or self.destroyed then return end
+
+    -- 3) Tenta pegar o ovo
+    self:_setStatus("Pegando ovo...")
+    local slotKey = nil
+    if IC_MODULES.SlotIdentity then
+        local looksFirst = IC_MODULES.SlotIdentity.LooksLikeFirstAreaUid or IC_MODULES.SlotIdentity.IsFirstAreaUid
+        local buildKey = IC_MODULES.SlotIdentity.SlotKey or IC_MODULES.SlotIdentity.BuildSlotKey
+        if looksFirst and buildKey then
+            local ok, isFirst = pcall(looksFirst, tostring(self.activeTarget.Uid))
+            if ok and isFirst and self.activeTarget.AreaId and self.activeTarget.NestId then
+                local ok2, built = pcall(buildKey, self.activeTarget.AreaId, self.activeTarget.NestId)
+                if ok2 then slotKey = built end
+            end
+        end
+    end
+
+    local pego = false
+    for i = 1, 20 do
+        if not self.enabled or self.destroyed then return end
+        if self.carryActive then
+            pego = true
+            break
+        end
+        pcall(icRequestFieldEggCarry, self.activeTarget.Uid, slotKey)
+        task.wait(0.15)
+    end
+
+    if pego or self.carryActive then
+        -- 4) Pego! Volta pra base
+        self:_setStatus("Pego! Voltando...")
+        task.wait(0.2)
+
+        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if r then
+            local safeCF = CFrame.new(IC_SAFE_ZONE_POS + Vector3.new(0, 3.5, 0))
+            for i = 1, 20 do
+                if not self.enabled or self.destroyed then return end
+                pcall(function()
                     r.AssemblyLinearVelocity = Vector3.zero
                     r.AssemblyAngularVelocity = Vector3.zero
+                    r.CFrame = safeCF
                 end)
+                task.wait(0.05)
             end
         end
-    end)
-
-    -- 🔥 TENTA PEGAR O OVO EM LOOP
-    task.spawn(function()
-        for i = 1, 30 do
-            if not self.enabled or self.destroyed or self.carryActive then break end
-            if self.activeTarget and self.activeTarget.Uid then
-                pcall(function()
-                    local slotKey = nil
-                    if IC_MODULES.SlotIdentity then
-                        local looksFirst = IC_MODULES.SlotIdentity.LooksLikeFirstAreaUid or IC_MODULES.SlotIdentity.IsFirstAreaUid
-                        local buildKey = IC_MODULES.SlotIdentity.SlotKey or IC_MODULES.SlotIdentity.BuildSlotKey
-                        if looksFirst and buildKey then
-                            local ok, isFirst = pcall(looksFirst, tostring(self.activeTarget.Uid))
-                            if ok and isFirst and self.activeTarget.AreaId and self.activeTarget.NestId then
-                                local ok2, built = pcall(buildKey, self.activeTarget.AreaId, self.activeTarget.NestId)
-                                if ok2 then slotKey = built end
-                            end
-                        end
-                    end
-                    icRequestFieldEggCarry(self.activeTarget.Uid, slotKey)
-                end)
-            end
-            task.wait(0.1)
+        self:_setStatus("Na base")
+        self:_finish("Safe return complete")
+    else
+        -- Não consegui pegar, volta mesmo assim
+        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if r and not icIsInSafeArea(r) then
+            icTeleportRoot(r, CFrame.new(IC_SAFE_ZONE_POS) * r.CFrame.Rotation)
         end
-    end)
-
-    -- Timeout de 5s
-    task.delay(5, function()
-        if teleportConn then teleportConn:Disconnect() end
-        if not self.destroyed and self.enabled and not self.carryActive and self.phase == "hunting" then
-            local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if r and not icIsInSafeArea(r) then
-                icTeleportRoot(r, CFrame.new(IC_SAFE_ZONE_POS) * r.CFrame.Rotation)
-            end
-            self:_finish("Carry timeout")
-        end
-    end)
+        self:_finish("Carry failed")
+    end
 end
 
 function InstantCarry:_returnToSafe()
