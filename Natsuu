@@ -1343,7 +1343,7 @@ function InstantCarry:_startHunt()
     icSetAnchored(false)
 self:_clearArrivalHold()
 
--- ANCORA pra ragdoll NÃO puxar e teleporta
+-- ANCORA pra ragdoll NÃO puxar
 pcall(function() root.Anchored = true end)
 task.wait(0.05)
 pcall(function()
@@ -1351,7 +1351,23 @@ pcall(function()
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
 end)
-task.wait(0.1)
+
+-- Fica ancorado até pegar o ovo OU o ragdoll acabar (máx 8s)
+local holdStart = os.clock()
+while (os.clock() - holdStart) < 8 do
+    if not self.enabled or self.destroyed then break end
+    if self.carryActive then break end
+    local ragdollEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    local remaining = ragdollEnd - workspace:GetServerTimeNow()
+    if remaining <= 0.1 then break end
+    pcall(function()
+        root.CFrame = dest
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+    task.wait(0.05)
+end
+
 pcall(function() root.Anchored = false end)
 
     -- 2) Slot key
