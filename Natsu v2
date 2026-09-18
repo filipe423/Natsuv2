@@ -1,0 +1,3079 @@
+--// Natsu Hub - Full
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local HttpService = game:GetService("HttpService")
+
+local runtimeEnv = getgenv and getgenv() or _G
+local UI_LOADED = false
+
+local Config = {
+    AutoSteal = false,
+    StealAreas = {"None"},
+    StealRarities = {"None"},
+    StealMode = "Instant",
+    StealNamesFilter = {"None"},
+    StealMinValue = 0,
+    TweenSpeedMultiplier = 30,
+    AntiGuardKnockback = true,
+    AntiTreadmillMount = true,
+    AutoTreadmillIdle = false,
+    AutoPlace = false,
+    PlaceRarities = {"None"},
+    AutoHatch = false,
+    AutoSell = false,
+    SellAll = false,
+    SellNames = {"None"},
+    SellRarities = {"None"},
+    AutoSellEgg = false,
+    SellEggRarities = {"None"},
+    WebhookEnabled = false,
+    WebhookURL = "",
+    IsStealing = false,
+    IsPlacing = false,
+}
+
+local SPOOF_CFG = {
+    KEY = "__NatsuStealMovementSpoof",
+    VERSION = 1,
+    INTEGRITY_KEY = "__NatsuStealIntegritySpoof",
+    SIGNAL = "ClientCharacter: GetDebugSnapshot",
+    HEADROOM = 1.35,
+    CLAMP = 0.15,
+    PADDING = 24,
+    MULTIPLIER = 10,
+    MIN_INPUT = 1,
+    MAX_INPUT = 100,
+    DEF_INPUT = 40,
+    MIN_SPEED = 10,
+    MAX_SPEED = 1000,
+    DEF_SPEED = 400,
+    FIELDS = {
+        "LastObservedSample", "LastSample", "LastGoodSample",
+        "LastGameplayTrustedSample", "LastValidatedSample",
+        "LastValidatedGroundedSample", "LastConfirmedGroundSample",
+        "CandidateGroundedSample"
+    }
+}
+
+local MOVEMENT_SPOOF_KEY = SPOOF_CFG.KEY
+local MOVEMENT_SPOOF_VERSION = SPOOF_CFG.VERSION
+local INTEGRITY_SPOOF_KEY = SPOOF_CFG.INTEGRITY_KEY
+local INTEGRITY_SIGNAL_NAME = SPOOF_CFG.SIGNAL
+local INTEGRITY_SPEED_HEADROOM = SPOOF_CFG.HEADROOM
+local LONG_FRAME_CLAMP = SPOOF_CFG.CLAMP
+local MOVEMENT_BASELINE_PADDING = SPOOF_CFG.PADDING
+local MIN_MOVEMENT_SPEED = SPOOF_CFG.MIN_SPEED
+local MAX_MOVEMENT_SPEED = SPOOF_CFG.MAX_SPEED
+local DEFAULT_MOVEMENT_SPEED = SPOOF_CFG.DEF_SPEED
+local INTEGRITY_SAMPLE_FIELDS = SPOOF_CFG.FIELDS
+
+local HOVER_PAD_SIZE_XZ = 8
+local HOVER_PAD_THICKNESS = 1
+local HOVER_PAD_NAME = "__NatsuHoverPad"
+local HOVER_PAD_OWNER_ATTRIBUTE = "NatsuStealRuntimeOwner"
+
+local hoverPadInstance = nil
+local hoverPadOwnerId = tostring(math.random(100000, 999999))
+local hoverPadConnection = nil
+local hoverPadPostConnection = nil
+local activeMoves = {}
+local tweenArrivalHold = nil
+local speedDialStuds
+
+do
+    local EggState = require(game:GetService("ReplicatedStorage").Client.EggState)
+    EggState.GetAreaEggSnapshot = EggState.ReadFieldEggs
+    EggState.GetAreaEggRecord = EggState.ReadFieldEgg
+    EggState.RequestAreaEggSnapshot = EggState.SyncFieldEggs
+    EggState.RequestCarryAreaEgg = EggState.CarryFieldEgg
+    EggState.RequestDropHeldAreaEgg = EggState.DropFieldEgg
+    EggState.AreaEggCarryStateChanged = EggState.CarryChanged
+    EggState.AreaEggClaimed = EggState.FieldClaimed
+    EggState.AreaEggUpdated = EggState.FieldShifted
+    EggState.AreaEggRemoved = EggState.FieldGone
+    EggState.GetOwnerRuntimeRecords = EggState.ReadOwnerEggs
+    EggState.RequestEquipTool = EggState.WearEggTool
+
+    local PlotState = require(game:GetService("ReplicatedStorage").Client.PlotState)
+    PlotState.GetMySlot = PlotState.ResolveLocalSlot
+    PlotState.GetPlotData = PlotState.ResolvePlot
+
+    local AreaEggResetWall = require(game:GetService("ReplicatedStorage").Client.AreaEggResetWall)
+    AreaEggResetWall.IsClosed = AreaEggResetWall.IsSealed
+end
+
+speedDialStuds = function()
+    local inputSpeed = math.clamp(
+        math.floor((tonumber(Config.TweenSpeedMultiplier) or SPOOF_CFG.DEF_INPUT) + 0.5),
+        SPOOF_CFG.MIN_INPUT,
+        SPOOF_CFG.MAX_INPUT
+    )
+    return inputSpeed * SPOOF_CFG.MULTIPLIER
+end
+function Config:applyStealValueInput(value)
+    local normalized = string.lower(tostring(value or "")):gsub("[%s,]", "")
+    if normalized == "" then
+        self.StealMinValue = 0
+        return true
+    end
+    local amountText, suffix = string.match(normalized, "^([%d]+%.?[%d]*)([kmb]?)$")
+    local amount = tonumber(amountText)
+    if not amount then return false end
+    local multiplier = 1
+    if suffix == "k" then
+        multiplier = 1e3
+    elseif suffix == "m" then
+        multiplier = 1e6
+    elseif suffix == "b" then
+        multiplier = 1e9
+    end
+    self.StealMinValue = amount * multiplier
+    return true
+end
+
+function Config:getAreaEggValue(record)
+    if not self._assetGenerationUtil then
+        self._assetGenerationUtil = require(game:GetService("ReplicatedStorage").Shared.Util.AssetEarnings)
+    end
+    return self._assetGenerationUtil.MutationOnlyRatePerSecond({
+        Category = record.AssetCategory,
+        Scale = record.AssetScale or 1,
+        Mutations = record.Mutations or {},
+        BaseMutation = record.BaseMutation,
+        EyeColor = record.AssetEyeColor,
+        ColorSeed = record.AssetColorSeed,
+        ColorIndex = record.AssetColorIndex,
+        Gender = record.Gender,
+        Personality = record.Personality or "Normal",
+        HasBeenFirstPlaced = record.HasBeenFirstPlaced == true,
+    })
+end
+
+local function environment()
+	return getgenv and getgenv() or _G
+end
+
+local function getMovementSpoof()
+	local env = environment()
+	local existing = env[MOVEMENT_SPOOF_KEY]
+	if type(existing) ~= "table" or existing.Version ~= MOVEMENT_SPOOF_VERSION then
+		if type(existing) == "table" then existing.Enabled = false end
+		existing = {
+			Version = MOVEMENT_SPOOF_VERSION,
+			Installed = false,
+			Enabled = false,
+			Mode = "StateBaseline",
+			Humanoid = nil,
+			RootPart = nil,
+			WalkSpeed = DEFAULT_MOVEMENT_SPEED,
+		}
+		env[MOVEMENT_SPOOF_KEY] = existing
+	end
+	return existing
+end
+
+local function setMovementSpoof(character, speed)
+	local holder = getMovementSpoof()
+	if not holder then return false end
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	holder.Humanoid = humanoid
+	holder.RootPart = root
+	holder.WalkSpeed = math.clamp(
+		tonumber(speed) or DEFAULT_MOVEMENT_SPEED,
+		MIN_MOVEMENT_SPEED,
+		MAX_MOVEMENT_SPEED * INTEGRITY_SPEED_HEADROOM
+	)
+	holder.Enabled = false
+	return humanoid ~= nil and root ~= nil
+end
+
+local function clearMovementSpoof()
+	local holder = environment()[MOVEMENT_SPOOF_KEY]
+	if type(holder) == "table" then
+		holder.Enabled = false
+		holder.Humanoid = nil
+		holder.RootPart = nil
+	end
+end
+
+local function findIntegrityState(player, humanoid, root)
+	local found = nil
+	if type(getcallbackvalue) == "function" and type(debug) == "table" and type(debug.getupvalue) == "function" then
+		local signalModule = ReplicatedStorage:FindFirstChild("Packages")
+			and ReplicatedStorage.Packages:FindFirstChild("Signal")
+		if signalModule then
+			local okSig, Signal = pcall(require, signalModule)
+			if okSig and type(Signal) == "table" and type(Signal.Invoked) == "function" then
+				local okBind, bindable = pcall(Signal.Invoked, INTEGRITY_SIGNAL_NAME)
+				if okBind and bindable then
+					local okCb, callback = pcall(getcallbackvalue, bindable, "OnInvoke")
+					if okCb and type(callback) == "function" then
+						local okInfo, info = pcall(debug.getinfo, callback)
+						if okInfo then
+							local function scan(value, depth, seen)
+								if found or type(value) ~= "table" or depth > 3 or seen[value] then return end
+								seen[value] = true
+								if rawget(value, "Player") == player
+									and rawget(value, "Character") == player.Character
+									and rawget(value, "Humanoid") == humanoid
+									and rawget(value, "RootPart") == root
+									and type(rawget(value, "SampleHistory")) == "table"
+									and type(rawget(value, "Evidence")) == "table"
+								then
+									found = value
+									return
+								end
+								local scanned = 0
+								for _, child in pairs(value) do
+									scanned = scanned + 1
+									if scanned > 128 then break end
+									if type(child) == "table" then scan(child, depth + 1, seen) end
+								end
+							end
+							for idx = 1, info.nups or 0 do
+								local okUp, upvalue = pcall(debug.getupvalue, callback, idx)
+								if okUp and type(upvalue) == "table" then
+									scan(upvalue, 0, {})
+									if found then break end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if not found and type(getgc) == "function" then
+		local okGc, objects = pcall(getgc, true)
+		if okGc and type(objects) == "table" then
+			for _, obj in ipairs(objects) do
+				if type(obj) == "table"
+					and rawget(obj, "Player") == player
+					and rawget(obj, "Character") == player.Character
+					and rawget(obj, "Humanoid") == humanoid
+					and rawget(obj, "RootPart") == root
+					and type(rawget(obj, "SampleHistory")) == "table"
+					and type(rawget(obj, "Evidence")) == "table"
+				then
+					found = obj
+					break
+				end
+			end
+		end
+	end
+	return found
+end
+
+local function patchIntegrityState(state, speed, travelVelocity)
+	if type(state) ~= "table" then return false end
+	local root = rawget(state, "RootPart")
+	local rootCFrame = root and root.Parent and root.CFrame or nil
+	local rootPosition = rootCFrame and rootCFrame.Position or nil
+	local coherentVelocity = typeof(travelVelocity) == "Vector3" and travelVelocity or Vector3.zero
+
+	local function patchSample(sample)
+		if type(sample) == "table" then
+			rawset(sample, "WalkSpeed", speed)
+			if rootCFrame then
+				rawset(sample, "CFrame", rootCFrame)
+				rawset(sample, "Position", rootPosition)
+				rawset(sample, "LinearVelocity", coherentVelocity)
+				rawset(sample, "AngularVelocity", Vector3.zero)
+			end
+		end
+	end
+
+	for _, field in ipairs(INTEGRITY_SAMPLE_FIELDS) do
+		patchSample(rawget(state, field))
+	end
+	for _, sample in pairs(rawget(state, "SampleHistory") or {}) do
+		patchSample(sample)
+	end
+	for _, sample in pairs(rawget(state, "SafeGroundCheckpoints") or {}) do
+		patchSample(sample)
+	end
+
+	local evidence = rawget(state, "Evidence")
+	if type(evidence) == "table" then
+		evidence.Speed = 0
+		evidence.Teleport = 0
+		evidence.Flight = 0
+	end
+
+	local impulse = rawget(state, "ImpulseContext")
+	if type(impulse) == "table" then
+		local horizontalSpeed = math.max(tonumber(impulse.MaxHorizontalSpeed) or 0, speed)
+		local duration = math.max(
+			(tonumber(impulse.ExpiresAt) or 0) - (tonumber(impulse.StartedAt) or 0),
+			LONG_FRAME_CLAMP
+		)
+		impulse.MaxHorizontalSpeed = horizontalSpeed
+		if rootPosition then impulse.OriginPosition = rootPosition end
+		impulse.MaxHorizontalDistance = math.max(
+			tonumber(impulse.MaxHorizontalDistance) or 0,
+			horizontalSpeed * duration + MOVEMENT_BASELINE_PADDING * 2
+		)
+		patchSample(impulse.PreMovementSafeSample)
+	end
+
+	if rawget(state, "CorrectionContext") == nil then
+		rawset(state, "FirstSuspiciousAt", nil)
+		if rawget(state, "ThreatLevel") == "Observing" then
+			rawset(state, "ThreatLevel", "Trusted")
+		end
+	end
+	return true
+end
+local function getIntegritySpoof()
+	local env = environment()
+	local holder = env[INTEGRITY_SPOOF_KEY]
+	if type(holder) ~= "table" then
+		holder = {}
+		env[INTEGRITY_SPOOF_KEY] = holder
+	end
+	return holder
+end
+
+local function integrityStateMatches(state, humanoid, root)
+	return type(state) == "table"
+		and rawget(state, "Player") == LocalPlayer
+		and rawget(state, "Character") == LocalPlayer.Character
+		and rawget(state, "Humanoid") == humanoid
+		and rawget(state, "RootPart") == root
+end
+
+local function integrityStateCanTravel(state, humanoid, root)
+	return integrityStateMatches(state, humanoid, root)
+end
+
+local function setIntegritySpoof(humanoid, root, speed)
+	local holder = getIntegritySpoof()
+	local state = holder.State
+	if not integrityStateMatches(state, humanoid, root) then
+		local now = os.clock()
+		if now < (holder.NextSearchAt or 0) then return false end
+		holder.NextSearchAt = now + 0.2
+		state = findIntegrityState(LocalPlayer, humanoid, root)
+	end
+	if not state then
+		return false
+	end
+	if not integrityStateCanTravel(state, humanoid, root) then
+		holder.Enabled = false
+		holder.Humanoid = humanoid
+		holder.RootPart = root
+		holder.State = state
+		return false
+	end
+	holder.NextSearchAt = 0
+	holder.Enabled = true
+	holder.Humanoid = humanoid
+	holder.RootPart = root
+	holder.State = state
+	holder.WalkSpeed = math.clamp(
+		speed * INTEGRITY_SPEED_HEADROOM,
+		MIN_MOVEMENT_SPEED,
+		MAX_MOVEMENT_SPEED * INTEGRITY_SPEED_HEADROOM
+	)
+	holder.TravelVelocity = Vector3.zero
+	patchIntegrityState(state, holder.WalkSpeed, holder.TravelVelocity)
+	return true
+end
+
+local function refreshIntegritySpoof(humanoid, root, speed, travelVelocity)
+	local holder = environment()[INTEGRITY_SPOOF_KEY]
+	if type(holder) ~= "table"
+		or not holder.Enabled
+		or holder.Humanoid ~= humanoid
+		or holder.RootPart ~= root
+		or not integrityStateCanTravel(holder.State, humanoid, root)
+	then
+		return false
+	end
+	holder.WalkSpeed = math.clamp(
+		speed * INTEGRITY_SPEED_HEADROOM,
+		MIN_MOVEMENT_SPEED,
+		MAX_MOVEMENT_SPEED * INTEGRITY_SPEED_HEADROOM
+	)
+	if typeof(travelVelocity) == "Vector3" then
+		holder.TravelVelocity = travelVelocity
+	elseif typeof(holder.TravelVelocity) ~= "Vector3" then
+		holder.TravelVelocity = Vector3.zero
+	end
+	return patchIntegrityState(holder.State, holder.WalkSpeed, holder.TravelVelocity)
+end
+
+local function clearIntegritySpoof(humanoid)
+	local holder = environment()[INTEGRITY_SPOOF_KEY]
+	if type(holder) ~= "table" then return end
+	if humanoid == nil or holder.Humanoid == humanoid then
+		holder.Enabled = false
+		holder.Humanoid = nil
+		holder.RootPart = nil
+		holder.State = nil
+		holder.TravelVelocity = nil
+		holder.NextSearchAt = 0
+	end
+end
+
+local globalIntegrityConnection = nil
+local function startGlobalMovementProtection()
+	if globalIntegrityConnection then return end
+	globalIntegrityConnection = RunService.PreSimulation:Connect(function()
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if not char or not root or not hum then return end
+		local targetSpeed = speedDialStuds()
+		setMovementSpoof(char, targetSpeed * INTEGRITY_SPEED_HEADROOM)
+		if not refreshIntegritySpoof(hum, root, targetSpeed) then
+			setIntegritySpoof(hum, root, targetSpeed)
+		end
+		enforceTweenArrivalHold()
+	end)
+end
+
+local function stopGlobalMovementProtection()
+	if globalIntegrityConnection then
+		pcall(globalIntegrityConnection.Disconnect, globalIntegrityConnection)
+		globalIntegrityConnection = nil
+	end
+	clearMovementSpoof()
+	clearIntegritySpoof()
+end
+
+local function purgeOrphanHoverPads()
+	for _, obj in ipairs(Workspace:GetChildren()) do
+		if obj:IsA("BasePart") and obj.Name == HOVER_PAD_NAME and obj ~= hoverPadInstance then
+			pcall(obj.Destroy, obj)
+		end
+	end
+end
+
+local function syncHoverPad(targetPos)
+	if not hoverPadInstance or not hoverPadInstance.Parent then return false end
+	local character = LocalPlayer.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid then return false end
+	local rootPosition = typeof(targetPos) == "Vector3" and targetPos or root.Position
+	local feetOffset = humanoid.RigType == Enum.HumanoidRigType.R15
+		and (root.Size.Y * 0.5 + math.max(humanoid.HipHeight, 0.5))
+		or (root.Size.Y * 0.5 + 2)
+	hoverPadInstance.CFrame = CFrame.new(
+		rootPosition.X,
+		rootPosition.Y - feetOffset - HOVER_PAD_THICKNESS * 0.5 - 0.05,
+		rootPosition.Z
+	)
+	return true
+end
+
+local function startHoverPad()
+	if not hoverPadInstance or not hoverPadInstance.Parent or hoverPadInstance:GetAttribute(HOVER_PAD_OWNER_ATTRIBUTE) ~= hoverPadOwnerId then
+		purgeOrphanHoverPads()
+		if hoverPadInstance and hoverPadInstance.Parent then pcall(hoverPadInstance.Destroy, hoverPadInstance) end
+		local part = Instance.new("Part")
+		part.Name = HOVER_PAD_NAME
+		part:SetAttribute(HOVER_PAD_OWNER_ATTRIBUTE, hoverPadOwnerId)
+		part.Anchored = true
+		part.CanCollide = true
+		part.CanQuery = true
+		part.CanTouch = false
+		part.CastShadow = false
+		part.Transparency = 1
+		part.Material = Enum.Material.SmoothPlastic
+		part.Size = Vector3.new(HOVER_PAD_SIZE_XZ, HOVER_PAD_THICKNESS, HOVER_PAD_SIZE_XZ)
+		hoverPadInstance = part
+		part.Parent = Workspace
+	end
+	syncHoverPad()
+	if not hoverPadConnection then
+		hoverPadConnection = RunService.PreSimulation:Connect(function()
+			if not syncHoverPad() then startHoverPad() end
+		end)
+	end
+	if not hoverPadPostConnection then
+		hoverPadPostConnection = RunService.PostSimulation:Connect(function()
+			syncHoverPad()
+		end)
+	end
+end
+
+local function stopHoverPad()
+	if hoverPadConnection then
+		pcall(hoverPadConnection.Disconnect, hoverPadConnection)
+		hoverPadConnection = nil
+	end
+	if hoverPadPostConnection then
+		pcall(hoverPadPostConnection.Disconnect, hoverPadPostConnection)
+		hoverPadPostConnection = nil
+	end
+	if hoverPadInstance then
+		pcall(hoverPadInstance.Destroy, hoverPadInstance)
+		hoverPadInstance = nil
+	end
+	purgeOrphanHoverPads()
+end
+
+local function clearTweenArrivalHold()
+	tweenArrivalHold = nil
+end
+
+local function setTweenArrivalHold(root, destination)
+	if root and typeof(destination) == "CFrame" then
+		tweenArrivalHold = {
+			Character = LocalPlayer.Character,
+			RootPart = root,
+			CFrame = destination,
+		}
+	end
+end
+
+local function enforceTweenArrivalHold()
+	local hold = tweenArrivalHold
+	if type(hold) ~= "table" or typeof(hold.CFrame) ~= "CFrame" then return false end
+	if LocalPlayer.Character ~= hold.Character or not hold.RootPart or not hold.RootPart.Parent then
+		tweenArrivalHold = nil
+		return false
+	end
+	startHoverPad()
+	hold.RootPart.AssemblyLinearVelocity = Vector3.zero
+	hold.RootPart.AssemblyAngularVelocity = Vector3.zero
+	syncHoverPad(hold.CFrame.Position)
+	hold.RootPart.CFrame = hold.CFrame
+	syncHoverPad(hold.CFrame.Position)
+	return true
+end
+local function stopAllActiveMovements()
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    for _, move in pairs(activeMoves) do
+        if type(move) == "table" then
+            move.cancelled = true
+        end
+    end
+    table.clear(activeMoves)
+    if hrp then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    end
+    clearTweenArrivalHold()
+    stopHoverPad()
+end
+
+local function applyKillPartIgnore(character)
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if root then
+        root:SetAttribute("KillPartIgnore", true)
+    end
+end
+
+local MOVEMENT_ARRIVAL_HOLD = 0.4
+local TWEEN_SAFE_ZONE_POSITION = Vector3.new(545, 71, -365)
+local TWEEN_CRUISE_HEIGHT = 5
+local MIN_TWEEN_DURATION = 0.08
+
+local function TweenMoveTo(hrp, hum, targetCFrame, isCancelledFn, holdAfterArrival, earlyArrivalFn, flightProfile)
+    if not hrp or not hum or typeof(targetCFrame) ~= "CFrame" then return false end
+    if isCancelledFn and isCancelledFn() then return false end
+
+    local prevMove = activeMoves[hrp]
+    if prevMove then
+        prevMove.cancelled = true
+        activeMoves[hrp] = nil
+    end
+
+    local character = hrp.Parent
+    if not character then return false end
+    clearTweenArrivalHold()
+    applyKillPartIgnore(character)
+    startGlobalMovementProtection()
+
+    local camera = workspace.CurrentCamera
+    if camera and camera.CameraSubject ~= hum then
+        pcall(function() camera.CameraSubject = hum end)
+    end
+
+    local originalAutoRotate = hum.AutoRotate
+    hum.AutoRotate = false
+
+    local cruiseY = flightProfile and math.max(
+        hrp.Position.Y,
+        targetCFrame.Position.Y + TWEEN_CRUISE_HEIGHT,
+        TWEEN_SAFE_ZONE_POSITION.Y + TWEEN_CRUISE_HEIGHT
+    ) or nil
+    local destination = cruiseY
+        and (CFrame.new(targetCFrame.Position.X, cruiseY, targetCFrame.Position.Z) * targetCFrame.Rotation)
+        or targetCFrame
+    local liveSpeed = math.clamp(speedDialStuds(), SPOOF_CFG.MIN_SPEED, SPOOF_CFG.MAX_SPEED)
+    setMovementSpoof(character, liveSpeed * SPOOF_CFG.HEADROOM)
+
+    local move = {cancelled = false}
+    activeMoves[hrp] = move
+    startHoverPad()
+
+    local arrivalStableSince = nil
+    local previousRemainingDistance = nil
+    local correctionSlowUntil = 0
+    local travelPhase = cruiseY and (math.abs(hrp.Position.Y - cruiseY) > 0.35 and "takeoff" or "cruise") or nil
+    local initialDistance = (destination.Position - hrp.Position).Magnitude
+    local timeoutAt = os.clock() + math.max(initialDistance / liveSpeed, MIN_TWEEN_DURATION) * 3 + 8
+    local completed = false
+    local earlyArrivalStarted = false
+
+    while not move.cancelled do
+        if isCancelledFn and isCancelledFn() then break end
+        if not hrp.Parent then break end
+        if os.clock() >= timeoutAt then break end
+
+        local deltaTime = RunService.Heartbeat:Wait()
+        local safeDeltaTime = math.max(math.min(deltaTime, LONG_FRAME_CLAMP), 1 / 240)
+
+        liveSpeed = math.clamp(speedDialStuds(), SPOOF_CFG.MIN_SPEED, SPOOF_CFG.MAX_SPEED)
+        setMovementSpoof(character, liveSpeed * SPOOF_CFG.HEADROOM)
+
+        local holder = environment()[SPOOF_CFG.INTEGRITY_KEY]
+        local integrityState = type(holder) == "table" and holder.State or nil
+        if not integrityStateCanTravel(integrityState, hum, hrp) then
+            previousRemainingDistance = nil
+            arrivalStableSince = nil
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+            syncHoverPad(hrp.Position)
+            if integrityStateMatches(integrityState, hum, hrp) then
+                patchIntegrityState(integrityState, liveSpeed * SPOOF_CFG.HEADROOM, Vector3.zero)
+            else
+                setIntegritySpoof(hum, hrp, liveSpeed)
+            end
+        else
+            local position = hrp.Position
+            local remaining = destination.Position - position
+            local remainingDistance = remaining.Magnitude
+            local horizontalRemaining = Vector3.new(remaining.X, 0, remaining.Z)
+            if cruiseY and travelPhase == "takeoff" and math.abs(position.Y - cruiseY) <= 0.35 then
+                travelPhase = "cruise"
+            end
+            local movementTarget = cruiseY and travelPhase == "takeoff"
+                and Vector3.new(position.X, cruiseY, position.Z)
+                or destination.Position
+            local movementRemaining = movementTarget - position
+            local movementDistance = movementRemaining.Magnitude
+            local progressDistance = cruiseY and horizontalRemaining.Magnitude or remainingDistance
+            if previousRemainingDistance and progressDistance > previousRemainingDistance + 2 then
+                correctionSlowUntil = os.clock() + 0.5
+            end
+            previousRemainingDistance = progressDistance
+            local effectiveSpeed = os.clock() < correctionSlowUntil
+                and math.max(SPOOF_CFG.MIN_SPEED, liveSpeed * 0.45)
+                or liveSpeed
+            local stepDistance = effectiveSpeed * safeDeltaTime
+
+            if earlyArrivalFn and not earlyArrivalStarted and remainingDistance <= 60 then
+                earlyArrivalStarted = true
+                task.spawn(earlyArrivalFn)
+            end
+
+            local currentLook = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+            local facingDirection = horizontalRemaining.Magnitude > 0.001 and horizontalRemaining.Unit
+                or (currentLook.Magnitude > 0.001 and currentLook.Unit or Vector3.new(0, 0, -1))
+
+            local canArrive = not cruiseY or travelPhase == "cruise"
+            if canArrive and remainingDistance <= math.max(stepDistance, 0.05) then
+                if remainingDistance > 0.5 then arrivalStableSince = nil end
+                syncHoverPad(destination.Position)
+                hrp.CFrame = CFrame.lookAt(destination.Position, destination.Position + facingDirection)
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+                syncHoverPad(destination.Position)
+                refreshIntegritySpoof(hum, hrp, liveSpeed, Vector3.zero)
+                arrivalStableSince = arrivalStableSince or os.clock()
+                if os.clock() - arrivalStableSince >= MOVEMENT_ARRIVAL_HOLD then
+                    completed = true
+                    break
+                end
+            else
+                arrivalStableSince = nil
+                if movementDistance <= 0.001 then
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                    hrp.AssemblyAngularVelocity = Vector3.zero
+                    syncHoverPad(position)
+                    continue
+                end
+                local actualStepDistance = math.min(stepDistance, movementDistance)
+                local nextPosition = position + movementRemaining.Unit * actualStepDistance
+                local travelVelocity = (nextPosition - position) / safeDeltaTime
+                syncHoverPad(nextPosition)
+                hrp.CFrame = CFrame.lookAt(nextPosition, nextPosition + facingDirection)
+                hrp.AssemblyLinearVelocity = travelVelocity
+                syncHoverPad(nextPosition)
+                if not refreshIntegritySpoof(hum, hrp, liveSpeed, travelVelocity) then
+                    setIntegritySpoof(hum, hrp, liveSpeed)
+                    refreshIntegritySpoof(hum, hrp, liveSpeed, travelVelocity)
+                end
+            end
+        end
+    end
+
+    if hum.Parent and originalAutoRotate ~= nil then hum.AutoRotate = originalAutoRotate end
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    if completed and holdAfterArrival then
+        setTweenArrivalHold(hrp, destination)
+    else
+        stopHoverPad()
+    end
+    return completed and not move.cancelled
+end
+local IC_MAX_TELEPORT_STUDS = 10000
+local IC_SAFE_ZONE_POS = Vector3.new(545, 71, -365)
+local IC_SAFE_ZONE_RADIUS = 30
+local IC_SAFE_ZONE_VERTICAL_TOLERANCE = 18
+local IC_HIT_TIMEOUT = 12
+local IC_GUARD_HIT_DISTANCE_BOOST = 25
+
+local function isStealNightBlocked()
+    local ok, AreaEggCycleModule = pcall(function()
+        return require(ReplicatedStorage.Shared.Util.AreaEggCycle)
+    end)
+    if ok and AreaEggCycleModule and type(AreaEggCycleModule.IsNightPhase) == "function" then
+        local ok2, isNight = pcall(AreaEggCycleModule.IsNightPhase, workspace:GetServerTimeNow())
+        if ok2 and isNight == true then return true end
+    end
+    local ok3, AreaEggResetWallModule = pcall(function()
+        return require(ReplicatedStorage.Client.AreaEggResetWall)
+    end)
+    if ok3 and AreaEggResetWallModule then
+        if type(AreaEggResetWallModule.IsSealed) == "function" then
+            local ok4, sealed = pcall(AreaEggResetWallModule.IsSealed)
+            if ok4 and sealed == true then return true end
+        end
+    end
+    return false
+end
+
+local function fieldStealEnabled()
+    return Config.AutoSteal
+end
+
+local function reserveAutoStealPriority(seconds)
+    Config.StealPriorityUntil = math.max(Config.StealPriorityUntil or 0, os.clock() + (seconds or 5))
+end
+
+local function hasMonstrousMutation(record)
+    if type(record) ~= "table" then return false end
+    if record.HasParasite == true then return true end
+    return false
+end
+
+local function safeRequire(mod)
+    if not mod then return nil end
+    local ok, res = pcall(require, mod)
+    if ok then return res end
+    return nil
+end
+
+local IC_MODULES = {
+    EggState = safeRequire(ReplicatedStorage:FindFirstChild("Client") and ReplicatedStorage.Client:FindFirstChild("EggState")),
+    AreaEggs = safeRequire(ReplicatedStorage:FindFirstChild("Shared") and ReplicatedStorage.Shared:FindFirstChild("Types") and ReplicatedStorage.Shared.Types:FindFirstChild("AreaEggs")),
+    AssetItems = safeRequire(ReplicatedStorage:FindFirstChild("Shared") and ReplicatedStorage.Shared:FindFirstChild("Util") and ReplicatedStorage.Shared.Util:FindFirstChild("AssetItems")),
+    AssetsData = safeRequire(ReplicatedStorage:FindFirstChild("Data") and ReplicatedStorage.Data:FindFirstChild("Assets")),
+    SlotIdentity = safeRequire(ReplicatedStorage:FindFirstChild("Shared") and ReplicatedStorage.Shared:FindFirstChild("Util") and ReplicatedStorage.Shared.Util:FindFirstChild("AreaEggSlotIdentity")),
+}
+
+local function icTeleportRoot(root, dest)
+    if not root or typeof(dest) ~= "CFrame" then return false end
+    local ok = pcall(function()
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        root.CFrame = dest
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+    if not ok then return false end
+    syncHoverPad(dest.Position)
+    local char = root.Parent
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        local liveSpeed = math.clamp(speedDialStuds(), SPOOF_CFG.MIN_SPEED, SPOOF_CFG.MAX_SPEED)
+        setMovementSpoof(char, liveSpeed * SPOOF_CFG.HEADROOM)
+        if not refreshIntegritySpoof(hum, root, liveSpeed, Vector3.zero) then
+            setIntegritySpoof(hum, root, liveSpeed)
+            refreshIntegritySpoof(hum, root, liveSpeed, Vector3.zero)
+        end
+    end
+    return true
+end
+
+local function icTeleportHops(root, dest)
+    if not root or typeof(dest) ~= "CFrame" then return false end
+    local from = root.Position
+    local to = dest.Position
+    local dist = (to - from).Magnitude
+    local hops = math.max(1, math.ceil(dist / IC_MAX_TELEPORT_STUDS))
+    for i = 1, hops do
+        local t = i / hops
+        local point = from:Lerp(to, t)
+        if not icTeleportRoot(root, CFrame.new(point) * dest.Rotation) then return false end
+        if i < hops then task.wait() end
+    end
+    return true
+end
+
+local function icRequestFieldEggCarry(uid, slotKey)
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if root then
+        pcall(function()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+    local EggWorld = require(ReplicatedStorage.Shared.Remotes).EggWorld
+    local payload = { Uid = uid }
+    if slotKey then payload.FirstAreaSlotKey = slotKey end
+    return EggWorld.AskFieldEggCarry:InvokeServer(payload) == true
+end
+
+local function icIsInSafeArea(root)
+    if not root then return false end
+    local d = root.Position - IC_SAFE_ZONE_POS
+    return Vector2.new(d.X, d.Z).Magnitude <= IC_SAFE_ZONE_RADIUS
+        and math.abs(d.Y) <= IC_SAFE_ZONE_VERTICAL_TOLERANCE
+end
+
+local SharedRagdollModule = nil
+pcall(function()
+    SharedRagdollModule = require(ReplicatedStorage.Shared.Modules.Ragdoll)
+end)
+
+local function icReadRagdollState()
+	local char = LocalPlayer.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+	local remaining = tEnd - workspace:GetServerTimeNow()
+	local physics = hum ~= nil and hum:GetState() == Enum.HumanoidStateType.Physics
+	local isRagdolled = false
+    if SharedRagdollModule and char then
+        local ok, res = pcall(SharedRagdollModule.IsRagdolled, char)
+        if ok and res == true then isRagdolled = true end
+    end
+    if not isRagdolled and char and remaining > 0 then
+		for _, descendant in ipairs(char:GetDescendants()) do
+			if (descendant:IsA("BallSocketConstraint") or descendant:IsA("HingeConstraint"))
+				and descendant.Enabled
+			then
+				isRagdolled = true
+				break
+			end
+		end
+	end
+	return remaining > 0.05 and (isRagdolled or physics), math.max(0, remaining), (physics or isRagdolled)
+end
+
+local function icSetAnchored(anchored)
+	runtimeEnv.__NatsuInstantAnchorLock = anchored == true
+    pcall(function()
+        local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if root and root.Anchored ~= anchored then root.Anchored = anchored end
+    end)
+end
+
+local function icRarityWeight(rarity)
+    local weights = {
+        Common = 1, Uncommon = 2, Rare = 3, Epic = 4,
+        Legendary = 5, Mythic = 6, Cosmic = 7, Secret = 8,
+        Eternal = 9, Divine = 10,
+    }
+    return weights[rarity] or 0
+end
+
+local function icGetRecordRarity(record)
+    local Assets = require(game:GetService("ReplicatedStorage").Data.Assets)
+    local categoryData = Assets and Assets.Directory and Assets.Directory[record.AssetCategory]
+    local rarityData = categoryData and categoryData.Rarity
+    if not rarityData then return "Unknown" end
+    if type(rarityData) == "string" then return rarityData end
+    return rarityData.DisplayName or rarityData._id or tostring(rarityData)
+end
+local InstantCarry = {}
+InstantCarry.__index = InstantCarry
+
+function InstantCarry.new()
+    local self = setmetatable({}, InstantCarry)
+    self.enabled = false
+    self.running = false
+    self.phase = "idle"
+    self.primerUid = nil
+    self.targetUid = nil
+    self.activeTarget = nil
+    self.carryActive = false
+    self.carryUid = nil
+    self.arrivalHold = nil
+    self.hitTimer = nil
+    self.planGeneration = 0
+    self.carryGeneration = 0
+    self.carryWorker = nil
+    self.carryAttemptToken = nil
+    self.ragdollEndTime = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    self.targetCycleStartedAt = nil
+    self.targetCycleSeconds = 0.9
+    self.rearmSeconds = 0.55
+    self.rearmStartedAt = nil
+    self.baitRagdollBaseline = 0
+    self.depositRetryScheduled = false
+    self.connections = {}
+    self.records = {}
+    self.stats = { status = "Idle" }
+    self:_connect()
+    return self
+end
+
+function InstantCarry:_connect()
+    local EggCmds = require(ReplicatedStorage.Client.EggState)
+
+    table.insert(self.connections, LocalPlayer:GetAttributeChangedSignal("RagdollEndTime"):Connect(function()
+        local previousEndTime = self.ragdollEndTime
+        self.ragdollEndTime = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+        if self.rearmStartedAt
+            and self.ragdollEndTime > math.max(previousEndTime, self.baitRagdollBaseline) + 0.1
+        then
+            local observed = math.min(1.5, os.clock() - self.rearmStartedAt + 0.12)
+            self.rearmSeconds = math.max(0.3, observed, self.rearmSeconds * 0.9)
+            self.rearmStartedAt = nil
+        end
+    end))
+
+    table.insert(self.connections, EggCmds.FieldRefreshed:Connect(function(snapshot)
+        self:_replaceSnapshot(snapshot)
+    end))
+
+    table.insert(self.connections, EggCmds.FieldShifted:Connect(function(record)
+        if record and record.Uid then self.records[record.Uid] = record end
+    end))
+
+    table.insert(self.connections, EggCmds.FieldGone:Connect(function(uid)
+        self.records[uid] = nil
+        if self.activeTarget and self.activeTarget.Uid == uid then
+            if self.carryActive and self.carryUid == uid then return end
+            self.carryAttemptToken = nil
+            self:_clearArrivalHold(uid)
+            local target = self.activeTarget
+            task.delay(0.65, function()
+                if self.destroyed or not self.enabled then return end
+                if self.carryActive and self.carryUid == uid then return end
+                if self.activeTarget == target and target.Uid == uid then
+                    self:_finish("Target removed")
+                end
+            end)
+        end
+    end))
+
+    table.insert(self.connections, EggCmds.CarryChanged:Connect(function(state)
+        if state.IsCarrying then
+            if self.running and self.activeTarget and state.Uid == self.activeTarget.Uid then
+                self.carryActive = true
+                self.carryUid = state.Uid
+                self.carryGeneration = self.carryGeneration + 1
+                self:_invalidateCarryWorker()
+                self.carryAttemptToken = nil
+                self:_clearArrivalHold(state.Uid)
+            end
+            return
+        end
+        if self.carryUid ~= nil and state.Uid ~= nil and state.Uid ~= self.carryUid then return end
+        local droppedUid = state.Uid or self.carryUid or (self.activeTarget and self.activeTarget.Uid)
+        self.carryGeneration = self.carryGeneration + 1
+        self:_invalidateCarryWorker()
+        self.carryAttemptToken = nil
+        self.carryActive = false
+        self.carryUid = nil
+    end))
+
+    table.insert(self.connections, LocalPlayer.CharacterRemoving:Connect(function()
+        self:_kbCancelTimer()
+        icSetAnchored(false)
+        self.running = false
+        self.carryActive = false
+        self.carryUid = nil
+        self.carryGeneration = self.carryGeneration + 1
+        self:_invalidateCarryWorker()
+        self.carryAttemptToken = nil
+        self.arrivalHold = nil
+    end))
+end
+
+function InstantCarry:_replaceSnapshot(snapshot)
+    table.clear(self.records)
+    local records = snapshot and (snapshot.Records or snapshot) or {}
+    for k, v in pairs(records) do
+        if type(v) == "table" and type(v.Uid) == "string" then self.records[v.Uid] = v
+        elseif type(k) == "string" and type(v) == "table" then self.records[k] = v end
+    end
+end
+
+function InstantCarry:_setStatus(s)
+    self.stats.status = s
+end
+
+function InstantCarry:_feetOffset(root, humanoid)
+    if humanoid.RigType == Enum.HumanoidRigType.R15 then
+        return root.Size.Y * 0.5 + math.max(humanoid.HipHeight, 0.5)
+    end
+    return root.Size.Y * 0.5 + 2
+end
+
+function InstantCarry:_resolveEggDestination(record, root, humanoid)
+    if type(record) ~= "table" or typeof(record.BottomCFrame) ~= "CFrame" then return nil end
+    if not root or not humanoid then return nil end
+    local standingHeight = self:_feetOffset(root, humanoid) + 0.15
+    return CFrame.new(record.BottomCFrame.Position + Vector3.new(0, standingHeight, 0))
+end
+
+function InstantCarry:_invalidateCarryWorker()
+    self.carryWorker = nil
+end
+
+function InstantCarry:_claimCarryWorker(kind, uid)
+    local current = self.carryWorker
+    if current and current.generation == self.carryGeneration then return nil end
+    local worker = { kind = kind, uid = uid, generation = self.carryGeneration }
+    self.carryWorker = worker
+    return worker
+end
+
+function InstantCarry:_isCarryWorkerCurrent(worker)
+    return self.enabled and not self.destroyed
+        and self.carryWorker == worker
+        and worker.generation == self.carryGeneration
+end
+
+function InstantCarry:_releaseCarryWorker(worker)
+    if self.carryWorker == worker then self.carryWorker = nil end
+end
+
+function InstantCarry:_recordShowsCarried(uid)
+    local EggCmds = require(ReplicatedStorage.Client.EggState)
+    local record = EggCmds.ReadFieldEgg(uid) or self.records[uid]
+    return type(record) == "table"
+        and record.State == "Carried"
+        and record.CarrierUserId == LocalPlayer.UserId
+end
+
+function InstantCarry:_kbCancelTimer()
+    if self.hitTimer then
+        pcall(task.cancel, self.hitTimer)
+        self.hitTimer = nil
+    end
+end
+
+function InstantCarry:_handleNightRetreat()
+    self.running = false
+    self.phase = "idle"
+    self.primerUid = nil
+    self.targetUid = nil
+    self.activeTarget = nil
+    self.carryActive = false
+    self.carryUid = nil
+    icSetAnchored(false)
+    self:_clearArrivalHold()
+    self:_kbCancelTimer()
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root and not icIsInSafeArea(root) then
+        local safeDest = CFrame.new(IC_SAFE_ZONE_POS + Vector3.new(0, 3.5, 0))
+        icTeleportRoot(root, safeDest)
+    end
+    self:_setStatus("Waiting for day")
+
+    task.delay(1.5, function()
+        if self.enabled and not self.destroyed and not self.running then
+            if not isStealNightBlocked() then
+                self:_schedule()
+            else
+                self:_handleNightRetreat()
+            end
+        end
+    end)
+end
+function InstantCarry:_choosePrimerEgg(excludeUid)
+    local AreaEggs = require(ReplicatedStorage.Shared.Types.AreaEggs)
+    local GuardAreas = workspace:FindFirstChild("__OBJECTS") 
+        and workspace.__OBJECTS:FindFirstChild("Areas") 
+        and workspace.__OBJECTS.Areas:FindFirstChild("GuardAreas")
+    local forestGuard = GuardAreas and GuardAreas:FindFirstChild("Forest") and GuardAreas.Forest:FindFirstChild("Guard")
+    local guardHrp = forestGuard and forestGuard:FindFirstChild("HumanoidRootPart")
+    local guardPos = guardHrp and guardHrp.Position
+
+    local best, bestDist = nil, math.huge
+    for _, rec in pairs(self.records) do
+        if rec.State ~= AreaEggs.States.Slot then continue end
+        if rec.AreaId ~= "Forest" then continue end
+        if rec.Uid == excludeUid then continue end
+        if rec.HasParasite == true then continue end
+        local dist = (guardPos and rec.BottomCFrame) 
+            and (rec.BottomCFrame.Position - guardPos).Magnitude 
+            or math.huge
+        if dist < bestDist then
+            best = rec
+            bestDist = dist
+        end
+    end
+    return best
+end
+
+function InstantCarry:_chooseTarget()
+    local AssetItems = IC_MODULES.AssetItems
+    local AreaEggs = IC_MODULES.AreaEggs
+    if not AreaEggs then return nil end
+    local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local best, bestRank, bestDist
+
+    local filterNames = Config.StealNamesFilter or {}
+    local filterAreas = Config.StealAreas or {}
+    local filterRarities = Config.StealRarities or {}
+
+    local hasRarityFilter = (#filterRarities > 0) 
+        and (table.find(filterRarities, "None") == nil) 
+        and (table.find(filterRarities, "All") == nil)
+    local hasAreaFilter = (#filterAreas > 0) 
+        and (table.find(filterAreas, "None") == nil) 
+        and (table.find(filterAreas, "All") == nil)
+    local hasNameFilter = (#filterNames > 0) 
+        and (table.find(filterNames, "None") == nil) 
+        and (table.find(filterNames, "All") == nil)
+
+    local Assets = IC_MODULES.AssetsData
+    local assetDirectory = Assets and Assets.Directory or {}
+
+    for _, rec in pairs(self.records) do
+        if rec.State ~= AreaEggs.States.Slot and rec.State ~= AreaEggs.States.Dropped then continue end
+        if rec.Uid == self.primerUid then continue end
+
+        local cat = rec.AssetCategory or "Unknown"
+        local area = rec.AreaId or "Unknown"
+        local rarity = icGetRecordRarity(rec)
+        local isPremium = (rarity == "Cosmic" or rarity == "Secret" or rarity == "Eternal" or rarity == "Divine")
+
+        local categoryData = assetDirectory[cat]
+        local dispName = (categoryData and categoryData.DisplayName) or cat
+
+        local areaMatch = (not hasAreaFilter) or (table.find(filterAreas, area) ~= nil)
+        local rarityMatch = (not hasRarityFilter) or (table.find(filterRarities, rarity) ~= nil)
+        local nameMatch = (not hasNameFilter) or (table.find(filterNames, cat) ~= nil) or (table.find(filterNames, dispName) ~= nil)
+        local valueMatch = (not Config.StealMinValue) or (Config.StealMinValue <= 0) or (Config:getAreaEggValue(rec) > Config.StealMinValue)
+
+        if areaMatch and rarityMatch and nameMatch and valueMatch then
+            local dist = root and (rec.BottomCFrame.Position - root.Position).Magnitude or math.huge
+            local rWeight = icRarityWeight(rarity)
+            local rank = (rWeight > 0 and rWeight) or (AssetItems and AssetItems.RarityRankForCategory(cat) or 0)
+            if isPremium then
+                rank = rank + 2000
+            end
+            if not best or rank > bestRank or (rank == bestRank and dist < bestDist) then
+                best = rec; bestRank = rank; bestDist = dist
+            end
+        end
+    end
+
+    return best
+end
+
+function InstantCarry:_schedule(forcePrimer)
+    if self.destroyed or not self.enabled or self.running then return end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then 
+        self:_setStatus("No character")
+        task.delay(1, function()
+            if not self.destroyed and self.enabled and not self.running then
+                self:_schedule()
+            end
+        end)
+        return 
+    end
+
+    local EggCmds = IC_MODULES.EggState or require(ReplicatedStorage.Client.EggState)
+    if EggCmds then
+        pcall(function()
+            local freshSnap = EggCmds.GetAreaEggSnapshot()
+            if freshSnap then self:_replaceSnapshot(freshSnap) end
+        end)
+    end
+
+    if isStealNightBlocked() then
+        self:_handleNightRetreat()
+        return
+    end
+
+    local target = self:_chooseTarget()
+    if not target then 
+        self:_setStatus("Waiting for target egg")
+        task.delay(1, function()
+            if not self.destroyed and self.enabled and not self.running then 
+                self:_schedule() 
+            end
+        end)
+        return 
+    end
+
+    local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    local rawRemaining = tEnd - workspace:GetServerTimeNow()
+    if not forcePrimer and rawRemaining >= (self.targetCycleSeconds + self.rearmSeconds + 0.35) then
+        self.targetUid = target.Uid
+        self.phase = "hunting"
+        self.running = true
+        self:_setStatus("Chain steal")
+        self:_startHunt()
+        return
+    end
+    if rawRemaining > 0 and not forcePrimer then forcePrimer = true end
+
+    local primer = self:_choosePrimerEgg(target.Uid)
+    if not primer then
+        self:_setStatus("Waiting for Forest primer")
+        task.delay(0.25, function()
+            if not self.destroyed and self.enabled and not self.running then
+                self:_schedule()
+            end
+        end)
+        return
+    end
+
+    self.phase = "priming"
+    self.baitRagdollBaseline = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    self.rearmStartedAt = os.clock()
+    self.primerUid = primer.Uid
+    self.targetUid = target.Uid
+    self.activeTarget = primer
+    self.running = true
+    self:_setStatus("Teleporting to primer")
+
+    local dest = self:_resolveEggDestination(primer, root, hum)
+    if not dest then self:_finish("Primer destination unavailable"); return end
+    icSetAnchored(false)
+    if not icTeleportHops(root, dest) then self:_finish("Teleport primer failed") return end
+    self:_setArrivalHold(dest, primer.Uid, "primer")
+    self:_requestCarry(primer, true)
+
+    local conn
+    conn = RunService.Heartbeat:Connect(function()
+        if not self.enabled or self.destroyed or self.phase ~= "priming" then
+            if conn then conn:Disconnect() end
+            return
+        end
+        local tEndNow = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+        if tEndNow > self.baitRagdollBaseline + 0.3 then
+            if conn then conn:Disconnect() end
+            task.spawn(function()
+                self:_startHunt()
+            end)
+        end
+    end)
+
+    task.delay(4, function()
+        if conn then conn:Disconnect() end
+        if not self.destroyed and self.enabled and self.phase == "priming" then
+            self:_finish("Primer carry timeout: retry")
+        end
+    end)
+end
+function InstantCarry:_requestCarry(record, teleportReapproach)
+    local AreaEggSlotIdentity = require(ReplicatedStorage.Shared.Util.AreaEggSlotIdentity)
+    if not self.running then return end
+    local uid = record.Uid
+    local attemptToken = {}
+    self.carryAttemptToken = attemptToken
+    self:_setStatus("Securing egg")
+    task.spawn(function()
+        local deadline = os.clock() + 2
+        while self.enabled and not self.destroyed and self.running
+            and self.carryAttemptToken == attemptToken
+            and self.activeTarget and self.activeTarget.Uid == uid
+        do
+            if self.carryActive and self.carryUid == uid and self:_recordShowsCarried(uid) then
+                self.carryAttemptToken = nil
+                return
+            end
+            if os.clock() >= deadline then
+                self.carryAttemptToken = nil
+                self:_clearArrivalHold(uid)
+                return
+            end
+            local EggCmds = require(ReplicatedStorage.Client.EggState)
+            local current = EggCmds.ReadFieldEgg(uid) or self.records[uid]
+            if not current then return end
+            if current.State == "Carried" and current.CarrierUserId ~= LocalPlayer.UserId then
+                return
+            end
+            local character = LocalPlayer.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            local destination = self:_resolveEggDestination(current, root, humanoid)
+            if not destination then return end
+            if (root.Position - destination.Position).Magnitude > 10 then
+                if teleportReapproach then
+                    icTeleportRoot(root, destination)
+                end
+            end
+            local looksLikeFirst = AreaEggSlotIdentity.LooksLikeFirstAreaUid
+                or AreaEggSlotIdentity.IsFirstAreaUid
+            local slotKey = looksLikeFirst and looksLikeFirst(uid)
+                and AreaEggSlotIdentity.SlotKey(current.AreaId, current.NestId)
+                or nil
+            pcall(icRequestFieldEggCarry, uid, slotKey)
+            task.wait(0.08)
+        end
+    end)
+end
+
+function InstantCarry:_startHunt()
+    local EggCmds = IC_MODULES.EggState or require(ReplicatedStorage.Client.EggState)
+    local AreaEggs = IC_MODULES.AreaEggs
+    self:_kbCancelTimer()
+    self.phase = "hunting"
+    self.primerUid = nil
+    self.targetCycleStartedAt = os.clock()
+
+    if EggCmds then
+        pcall(function()
+            local snapshot = EggCmds.GetAreaEggSnapshot()
+            if snapshot then self:_replaceSnapshot(snapshot) end
+        end)
+    end
+    local latestBest = self:_chooseTarget()
+    if latestBest then self.targetUid = latestBest.Uid end
+
+    local targetUid = self.targetUid
+    self.targetUid = nil
+    if not targetUid then self:_finish("No target"); return end
+
+    local current = nil
+    if type(EggCmds.ReadFieldEgg) == "function" then
+        current = EggCmds.ReadFieldEgg(targetUid)
+    end
+    if not current then current = self.records[targetUid] end
+
+    if not current or (current.State ~= AreaEggs.States.Slot and current.State ~= AreaEggs.States.Dropped) then
+        self:_finish("Target gone"); return
+    end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum then self:_finish("No character"); return end
+
+    self.activeTarget = current
+    self:_setStatus("Teleporting to target")
+
+    local dest = self:_resolveEggDestination(current, root, hum)
+    if not dest then self:_finish("Target destination unavailable"); return end
+
+    icSetAnchored(false)
+    self:_clearArrivalHold()
+
+    -- ANCORA pra ragdoll NÃO puxar e teleporta
+    pcall(function() root.Anchored = true end)
+    task.wait(0.05)
+    pcall(function()
+        root.CFrame = dest
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+    task.wait(0.1)
+
+    -- Slot key
+    local slotKey = nil
+    if IC_MODULES.SlotIdentity then
+        local looksFirst = IC_MODULES.SlotIdentity.LooksLikeFirstAreaUid or IC_MODULES.SlotIdentity.IsFirstAreaUid
+        local buildKey = IC_MODULES.SlotIdentity.SlotKey or IC_MODULES.SlotIdentity.BuildSlotKey
+        if looksFirst and buildKey then
+            local ok, isFirst = pcall(looksFirst, tostring(self.activeTarget.Uid))
+            if ok and isFirst and self.activeTarget.AreaId and self.activeTarget.NestId then
+                local ok2, built = pcall(buildKey, self.activeTarget.AreaId, self.activeTarget.NestId)
+                if ok2 then slotKey = built end
+            end
+        end
+    end
+
+    -- Tenta pegar RÁPIDO enquanto ainda ancorado
+    self:_setStatus("Pegando ovo...")
+    local pego = false
+    local pegarStart = os.clock()
+    while (os.clock() - pegarStart) < 1.5 do
+        if not self.enabled or self.destroyed then
+            pcall(function() root.Anchored = false end)
+            return
+        end
+        pcall(function()
+            root.CFrame = dest
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+        if self.carryActive then
+            pego = true
+            break
+        end
+        pcall(icRequestFieldEggCarry, self.activeTarget.Uid, slotKey)
+        task.wait(0.05)
+    end
+
+    pcall(function() root.Anchored = false end)
+
+    if pego or self.carryActive then
+        self:_setStatus("Pego! Voltando...")
+
+        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if not r or not h then self:_finish("No root"); return end
+
+        local oldSpeed = Config.TweenSpeedMultiplier
+        Config.TweenSpeedMultiplier = 30
+
+        local safeCF = CFrame.new(IC_SAFE_ZONE_POS + Vector3.new(0, 3.5, 0))
+        pcall(function()
+            TweenMoveTo(r, h, safeCF, function()
+                return not self.enabled or self.destroyed
+            end, false)
+        end)
+
+        Config.TweenSpeedMultiplier = oldSpeed
+
+        local depositStart = os.clock()
+        while (os.clock() - depositStart) < 4 do
+            if self.destroyed then break end
+            if not self.carryActive then break end
+            local rr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if rr then
+                pcall(function()
+                    rr.AssemblyLinearVelocity = Vector3.zero
+                    rr.AssemblyAngularVelocity = Vector3.zero
+                    rr.CFrame = safeCF
+                end)
+            end
+            task.wait(0.05)
+        end
+
+        self:_setStatus("Na base")
+        self:_finish("Return complete")
+    else
+        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if r and not icIsInSafeArea(r) then
+            icTeleportRoot(r, CFrame.new(IC_SAFE_ZONE_POS) * r.CFrame.Rotation)
+        end
+        self:_finish("Carry failed")
+    end
+end
+function InstantCarry:_returnToSafe()
+    local uid = self.carryUid
+    local worker = self:_claimCarryWorker("return", uid)
+    if not worker then return end
+    self:_clearArrivalHold(uid)
+    if not self.carryActive then
+        self:_releaseCarryWorker(worker)
+        self:_finish("Carry not confirmed")
+        return
+    end
+
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then self:_releaseCarryWorker(worker); self:_finish("No character"); return end
+
+    local safeDest = CFrame.new(IC_SAFE_ZONE_POS) * root.CFrame.Rotation
+    if not icIsInSafeArea(root) then
+        self:_setStatus("Teleporting to safe area")
+        if not icTeleportHops(root, safeDest) then
+            self:_releaseCarryWorker(worker)
+            self:_finish("Safe teleport failed")
+            return
+        end
+    end
+
+    self:_setArrivalHold(safeDest, uid, "safe")
+    icSetAnchored(false)
+
+    local stableSince = os.clock()
+    local deadline = os.clock() + 3.5
+    while self:_isCarryWorkerCurrent(worker) and self.carryActive and os.clock() < deadline do
+        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not r then self:_releaseCarryWorker(worker); self:_finish("No character"); return end
+        task.wait(0.02)
+    end
+    if not self:_isCarryWorkerCurrent(worker) then return end
+    if not self.carryActive then
+        self:_releaseCarryWorker(worker)
+        self:_finish("Safe return complete")
+        return
+    end
+    self:_releaseCarryWorker(worker)
+    self:_finish("Deposit pending")
+end
+
+function InstantCarry:_reStealDroppedEgg(uid)
+    if type(uid) ~= "string" or uid == "" then self:_finish("Egg lost"); return end
+    local worker = self:_claimCarryWorker("re-steal", uid)
+    if not worker then return end
+    task.spawn(function()
+        local EggCmds = require(ReplicatedStorage.Client.EggState)
+        local record = nil
+        local deadline = os.clock() + 5
+        while self:_isCarryWorkerCurrent(worker) and os.clock() < deadline do
+            local candidate = EggCmds.ReadFieldEgg(uid) or self.records[uid]
+            if candidate and (candidate.State == "Dropped" or candidate.State == "Slot") then
+                record = candidate
+                break
+            end
+            task.wait(0.03)
+        end
+        if not self:_isCarryWorkerCurrent(worker) then return end
+        if not record then self:_releaseCarryWorker(worker); self:_finish("Egg lost"); return end
+        self:_releaseCarryWorker(worker)
+    end)
+end
+
+function InstantCarry:_setArrivalHold(cframe, uid, phase)
+    local character = LocalPlayer.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if character and root and typeof(cframe) == "CFrame" then
+        self.arrivalHold = {
+            Character = character,
+            RootPart = root,
+            CFrame = cframe,
+            Uid = uid,
+            Phase = phase,
+        }
+    end
+end
+
+function InstantCarry:_clearArrivalHold(uid)
+    if not self.arrivalHold then return end
+    if uid == nil or self.arrivalHold.Uid == nil or self.arrivalHold.Uid == uid then
+        self.arrivalHold = nil
+    end
+end
+
+function InstantCarry:_enforceArrivalHold()
+    local hold = self.arrivalHold
+    if not hold or typeof(hold.CFrame) ~= "CFrame" then return end
+    if LocalPlayer.Character ~= hold.Character or not hold.RootPart or not hold.RootPart.Parent then
+        self.arrivalHold = nil
+        return
+    end
+    local root = hold.RootPart
+    pcall(function()
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        root.CFrame = hold.CFrame
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+end
+
+function InstantCarry:_finish(reason)
+    self.carryGeneration = self.carryGeneration + 1
+    self:_invalidateCarryWorker()
+    self.carryAttemptToken = nil
+    self.depositRetryScheduled = false
+    self.targetCycleStartedAt = nil
+    self.phase = "idle"
+    self.primerUid = nil
+    self.targetUid = nil
+    self.activeTarget = nil
+    self.running = false
+    icSetAnchored(false)
+    self:_clearArrivalHold()
+    self:_kbCancelTimer()
+    self.planGeneration = self.planGeneration + 1
+    self:_setStatus("Idle")
+
+    if self.enabled then
+        task.delay(0.5, function()
+            if self.enabled and not self.destroyed and not self.running then
+                self:_schedule(true)
+            end
+        end)
+    end
+end
+
+function InstantCarry:setEnabled(value)
+    self.enabled = value == true
+    if self.enabled then
+        local EggCmds = require(ReplicatedStorage.Client.EggState)
+        startGlobalMovementProtection()
+        self:_setStatus("Starting")
+        self:_replaceSnapshot(EggCmds.GetAreaEggSnapshot())
+        self:_schedule()
+    else
+        self.carryGeneration = self.carryGeneration + 1
+        self:_invalidateCarryWorker()
+        self.carryAttemptToken = nil
+        self.carryActive = false
+        self.carryUid = nil
+        self.targetCycleStartedAt = nil
+        self.rearmStartedAt = nil
+        self.planGeneration = self.planGeneration + 1
+        self:_kbCancelTimer()
+        icSetAnchored(false)
+        self:_clearArrivalHold()
+        self:_finish("Disabled")
+        if not fieldStealEnabled() then stopGlobalMovementProtection() end
+    end
+end
+
+function InstantCarry:destroy()
+    self.destroyed = true
+    self.enabled = false
+    self.carryGeneration = self.carryGeneration + 1
+    self:_invalidateCarryWorker()
+    self.carryAttemptToken = nil
+    self.targetCycleStartedAt = nil
+    self.rearmStartedAt = nil
+    self:_kbCancelTimer()
+    icSetAnchored(false)
+    self:_finish("Destroyed")
+    for _, c in ipairs(self.connections) do
+        pcall(c.Disconnect, c)
+    end
+    table.clear(self.connections)
+    table.clear(self.records)
+end
+
+local previousIcRunner = runtimeEnv.icRunner
+if type(previousIcRunner) == "table" and type(previousIcRunner.destroy) == "function" then
+    pcall(previousIcRunner.destroy, previousIcRunner)
+end
+local icRunner = InstantCarry.new()
+getgenv().icRunner = icRunner
+getgenv().ZeroinConfig = Config
+getgenv().stopAllActiveMovements = stopAllActiveMovements
+getgenv().stopGlobalMovementProtection = stopGlobalMovementProtection
+getgenv().startGlobalMovementProtection = startGlobalMovementProtection
+getgenv().icRequestFieldEggCarry = icRequestFieldEggCarry
+getgenv().fieldStealEnabled = fieldStealEnabled
+getgenv().isStealNightBlocked = isStealNightBlocked
+-- ============================================================
+-- CARREGA ZEROIN UI
+-- ============================================================
+local function LoadZeroinUI()
+    local url = "https://raw.githubusercontent.com/iSylvesterr/library/cbc66f3/ZeroLib.lua"
+    local cacheName = "Natsu_ZeroLib.lua"
+    local result = nil
+    if isfile and readfile and isfile(cacheName) then
+        pcall(function() result = readfile(cacheName) end)
+    end
+    if not result or result == "" or string.len(result) < 100 then
+        for i = 1, 3 do
+            local success, res = pcall(function() return game:HttpGet(url) end)
+            if success and res and string.len(res) > 100 and not string.match(res, "404: Not Found") then
+                result = res
+                if writefile then pcall(function() writefile(cacheName, result) end) end
+                break
+            end
+            task.wait(1)
+        end
+    end
+    if result and string.len(result) > 100 then
+        local func, err = loadstring(result)
+        if func then
+            local success, lib = pcall(func)
+            if success and lib then return lib end
+            warn("[NatsuUI] Execution Error: " .. tostring(lib))
+        else
+            warn("[NatsuUI] Parse Error: " .. tostring(err))
+        end
+    end
+    return nil
+end
+
+local Library = LoadZeroinUI()
+if not Library then
+    warn("[Natsu Hub] Falha ao carregar ZeroLib!")
+    return
+end
+
+-- ============================================================
+-- JANELA PRINCIPAL
+-- ============================================================
+local Window = Library:Window({
+    Title = "Natsu Hub",
+    Footer = "Steal An Egg",
+    Version = "5.0.0",
+    Color = Color3.fromRGB(125, 55, 220),
+    Color2 = Color3.fromRGB(16, 14, 24),
+    ["Tab Width"] = 130,
+    Image = "79481584966698",
+    WindowIMG = "124404129684886",
+    LogoHUB = "124404129684886",
+    NotificationIcon = "124404129684886"
+})
+
+local Tabs = Window
+
+-- ============================================================
+-- HELPERS DE DROPDOWN
+-- ============================================================
+local dropdownUpdateGuard = {}
+local function handleDropdownChange(val, dropObj)
+    local arr = {}
+    if type(val) == "table" then
+        for k, v in pairs(val) do
+            if type(k) == "number" then table.insert(arr, v)
+            elseif type(k) == "string" and v == true then table.insert(arr, k) end
+        end
+    else
+        arr = {val}
+    end
+    if dropObj and dropdownUpdateGuard[dropObj] then return arr end
+    local changed = false
+    if #arr > 1 and table.find(arr, "None") then
+        local newArr = {}
+        for _, item in ipairs(arr) do
+            if item ~= "None" then table.insert(newArr, item) end
+        end
+        arr = newArr
+        changed = true
+    elseif #arr == 0 then
+        arr = {"None"}
+        changed = true
+    end
+    if changed and dropObj then
+        dropdownUpdateGuard[dropObj] = true
+        pcall(function() dropObj:Set(arr) end)
+        dropdownUpdateGuard[dropObj] = nil
+    end
+    return arr
+end
+
+local function readDropdownFilter(dropObj)
+    if not dropObj or type(dropObj.GetValue) ~= "function" then return nil end
+    local ok, val = pcall(function() return dropObj:GetValue() end)
+    if not ok then return nil end
+    if type(val) == "table" then
+        local arr = {}
+        for k, v in pairs(val) do
+            if type(k) == "number" then table.insert(arr, v)
+            elseif type(k) == "string" and v == true then table.insert(arr, k) end
+        end
+        return arr
+    end
+    if type(val) == "string" then return {val} end
+    return nil
+end
+
+local function petMatchesSellFilter(petName, rarity, names, rarities)
+    if Config.SellAll then return true end
+    if type(names) ~= "table" or type(rarities) ~= "table" then return false end
+    local nameMatch = false
+    if #names == 0 or table.find(names, "None") then nameMatch = false
+    elseif table.find(names, "All") then nameMatch = true
+    else nameMatch = table.find(names, petName) ~= nil end
+    local rarityMatch = false
+    if #rarities == 0 or table.find(rarities, "None") then rarityMatch = false
+    elseif table.find(rarities, "All") then rarityMatch = true
+    else rarityMatch = table.find(rarities, rarity) ~= nil end
+    return nameMatch or rarityMatch
+end
+
+local function eggMatchesSellFilter(rarity, rarities)
+    if type(rarities) ~= "table" then return false end
+    if #rarities == 0 or table.find(rarities, "None") then return false end
+    if table.find(rarities, "All") then return true end
+    return table.find(rarities, rarity) ~= nil
+end
+
+local function autoSellCanRun()
+    if Config.IsStealing or Config.IsParasiteProcessing then return false end
+    if not fieldStealEnabled() then return true end
+    return os.clock() >= (Config.StealPriorityUntil or 0)
+end
+-- ============================================================
+-- ANTI TREADMILL
+-- ============================================================
+local treadmillActiveId = nil
+local treadmillIdleMountRequested = false
+
+local function readTreadmillMountedFromServer()
+    local ok, activeIds = pcall(function()
+        return require(ReplicatedStorage.Shared.Remotes).Treadmill.AskRenderSnapshot:InvokeServer()
+    end)
+    if not ok or type(activeIds) ~= "table" then return nil end
+    return table.find(activeIds, LocalPlayer.UserId) ~= nil
+end
+
+local function requestTreadmillUnequip()
+    local pcallOk, serverOk, reason = pcall(function()
+        return require(ReplicatedStorage.Shared.Remotes).Treadmill.AskDoff:InvokeServer()
+    end)
+    if not pcallOk then return false, tostring(serverOk) end
+    if serverOk ~= true then return false, tostring(reason) end
+    return true
+end
+
+local function findMyTreadmillStandPart()
+    local ok, part = pcall(function()
+        local slot = require(ReplicatedStorage.Client.PlotState).GetMySlot()
+        if slot == nil then return nil end
+        local folder = workspace:FindFirstChild("__ClientTreadmillRenders")
+        if not folder then return nil end
+        local render = folder:FindFirstChild("TreadmillRender_" .. tostring(slot))
+        if not render then return nil end
+        local root = render:FindFirstChild("Root")
+        if root and root:IsA("BasePart") then return root end
+        return nil
+    end)
+    if not ok then return nil end
+    return part
+end
+
+local function setupAntiTreadmillMount()
+    pcall(function()
+        local Remotes = require(ReplicatedStorage.Shared.Remotes)
+        Remotes.Treadmill.RenderStateShifted.OnClientEvent:Connect(function(treadmillId)
+            treadmillActiveId = treadmillId
+            if treadmillId == nil then return end
+            if treadmillIdleMountRequested and Config.AutoTreadmillIdle and not Config.IsStealing then return end
+            if not Config.AntiTreadmillMount then return end
+            task.spawn(function()
+                task.wait(0.05)
+                if not Config.AntiTreadmillMount then return end
+                requestTreadmillUnequip()
+            end)
+        end)
+    end)
+end
+task.spawn(setupAntiTreadmillMount)
+
+task.spawn(function()
+    task.wait(3)
+    while true do
+        local mounted = readTreadmillMountedFromServer()
+        if mounted ~= nil then
+            if not mounted then
+                treadmillActiveId = nil
+            elseif treadmillActiveId == nil then
+                treadmillActiveId = "unknown"
+            end
+            if mounted and Config.AntiTreadmillMount and not treadmillIdleMountRequested then
+                requestTreadmillUnequip()
+            end
+        end
+        task.wait(30)
+    end
+end)
+
+-- ============================================================
+-- ANTI GUARD KNOCKBACK
+-- ============================================================
+local guardNoCollideOriginals = {}
+
+local function setGuardNoCollide(character, enable)
+    if not character then return end
+    for _, descendant in ipairs(character:GetChildren()) do
+        if descendant:IsA("BasePart") then
+            if enable then
+                if guardNoCollideOriginals[descendant] == nil then
+                    guardNoCollideOriginals[descendant] = descendant.CollisionGroup
+                end
+                pcall(function() descendant.CollisionGroup = "GuardsNoCollide" end)
+            else
+                local original = guardNoCollideOriginals[descendant]
+                if original then
+                    pcall(function() descendant.CollisionGroup = original end)
+                end
+            end
+        end
+    end
+end
+
+local function setGuardRagdollImmune(humanoid, enable)
+    if not humanoid then return end
+    pcall(function()
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics, not enable)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding, not enable)
+        humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, not enable)
+        humanoid.BreakJointsOnDeath = false
+    end)
+end
+
+local FALLDOWN_STATES = {
+    [Enum.HumanoidStateType.Physics] = true,
+    [Enum.HumanoidStateType.FallingDown] = true,
+    [Enum.HumanoidStateType.Ragdoll] = true,
+    [Enum.HumanoidStateType.PlatformStanding] = true,
+    [Enum.HumanoidStateType.Seated] = true
+}
+local lastRagdollScanAt = 0
+local lastAntiGuardStepAt = 0
+RunService.Stepped:Connect(function()
+    if not Config.AntiGuardKnockback then return end
+    local now = os.clock()
+    if now - lastAntiGuardStepAt < 0.05 then return end
+    lastAntiGuardStepAt = now
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+
+    if now - lastRagdollScanAt >= 1.0 then
+        lastRagdollScanAt = now
+        for _, descendant in ipairs(char:GetChildren()) do
+            if descendant:IsA("BallSocketConstraint") or descendant:IsA("HingeConstraint") then
+                if descendant:GetAttribute("RagdollConstraint") or descendant.Name:find("Ragdoll") then
+                    pcall(function() descendant:Destroy() end)
+                end
+            elseif descendant:IsA("Attachment") then
+                if descendant:GetAttribute("RagdollAttachment") or descendant.Name:find("Ragdoll") then
+                    pcall(function() descendant:Destroy() end)
+                end
+            end
+        end
+    end
+
+    if hum then
+        if hum.PlatformStand then hum.PlatformStand = false end
+        if hum.Sit then hum.Sit = false end
+        if FALLDOWN_STATES[hum:GetState()] then
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+        end
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+    guardNoCollideOriginals = {}
+    local hum = character:WaitForChild("Humanoid", 5)
+    if Config.AntiGuardKnockback then
+        setGuardNoCollide(character, true)
+        setGuardRagdollImmune(hum, true)
+    end
+    character.DescendantAdded:Connect(function(descendant)
+        if Config.AntiGuardKnockback and descendant:IsA("BasePart") then
+            if guardNoCollideOriginals[descendant] == nil then
+                guardNoCollideOriginals[descendant] = descendant.CollisionGroup
+            end
+            pcall(function() descendant.CollisionGroup = "GuardsNoCollide" end)
+        end
+    end)
+end)
+-- ============================================================
+-- FPS BOOST
+-- ============================================================
+local function hideModelIfNotMine(model)
+    if not model or not model:IsA("Model") then return end
+    local ownerIdStr = model.Name:match("^(%d+)_")
+    local ownerId = ownerIdStr and tonumber(ownerIdStr)
+    if not ownerId or ownerId == LocalPlayer.UserId then return end
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.Transparency = 1
+            part.CanCollide = false
+        elseif part:IsA("Decal") or part:IsA("Texture") then
+            part.Transparency = 1
+        elseif part:IsA("ParticleEmitter") or part:IsA("Trail") or part:IsA("Beam") then
+            part.Enabled = false
+        elseif part:IsA("BillboardGui") or part:IsA("SurfaceGui") then
+            part.Enabled = false
+        end
+    end
+end
+
+local function hideOtherPlayersEggs()
+    if Config._fpsEggsReady then return true end
+    local ready = false
+    pcall(function()
+        local PlacedEggRenderer = require(ReplicatedStorage.Shared.Eggs.PlacedEggRenderer)
+        local renderFolder = PlacedEggRenderer.GetRenderFolder()
+        if not renderFolder then return end
+        for _, model in ipairs(renderFolder:GetChildren()) do
+            hideModelIfNotMine(model)
+        end
+        renderFolder.ChildAdded:Connect(function(model)
+            task.defer(hideModelIfNotMine, model)
+        end)
+        ready = true
+    end)
+    return ready
+end
+
+local function hideModelAlways(model)
+    if not model or not model:IsA("Model") then return end
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.Transparency = 1
+            part.CanCollide = false
+        elseif part:IsA("Decal") or part:IsA("Texture") then
+            part.Transparency = 1
+        elseif part:IsA("ParticleEmitter") or part:IsA("Trail") or part:IsA("Beam") then
+            part.Enabled = false
+        elseif part:IsA("BillboardGui") or part:IsA("SurfaceGui") then
+            part.Enabled = false
+        elseif part:IsA("Highlight") then
+            part.Enabled = false
+        end
+    end
+end
+
+local function hideOtherPlayersPets()
+    if Config._fpsPetsReady then return true end
+    local ok = pcall(function()
+        local SettingsCmds = require(ReplicatedStorage.Shared.SettingsCmds)
+        SettingsCmds.Write("HideOtherPets", true)
+    end)
+    local ready = false
+    pcall(function()
+        local renderFolder = workspace:FindFirstChild("ClientRenderedAssets")
+            or workspace:WaitForChild("ClientRenderedAssets", 10)
+        if not renderFolder then return end
+        for _, model in ipairs(renderFolder:GetChildren()) do
+            hideModelAlways(model)
+        end
+        renderFolder.ChildAdded:Connect(function(model)
+            task.defer(hideModelAlways, model)
+        end)
+        ready = true
+    end)
+    return ready
+end
+
+local function reduceGraphicsQuality()
+    pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+    pcall(function()
+        UserSettings():GetService("UserGameSettings").SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
+    end)
+    pcall(function() game:GetService("Lighting").GlobalShadows = false end)
+end
+
+local function ApplyFPSBoost()
+    if Config._fpsBoostApplied then return end
+    Config._fpsBoostApplied = true
+    reduceGraphicsQuality()
+    Config._fpsEggsReady = hideOtherPlayersEggs()
+    Config._fpsPetsReady = hideOtherPlayersPets()
+end
+
+-- ============================================================
+-- WEBHOOK
+-- ============================================================
+local function httpPostJson(url, jsonBody)
+    local requestFn = (syn and syn.request) or request or http_request or (http and http.request)
+    if requestFn then
+        pcall(function()
+            requestFn({
+                Url = url,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = jsonBody
+            })
+        end)
+        return
+    end
+    pcall(function()
+        HttpService:PostAsync(url, jsonBody, Enum.HttpContentType.ApplicationJson)
+    end)
+end
+
+local function sendWebhookTest()
+    if type(Config.WebhookURL) ~= "string" or Config.WebhookURL == "" then return end
+    task.spawn(function()
+        pcall(function()
+            local payload = {
+                username = "Natsu Hub",
+                embeds = {{
+                    title = "Webhook Test",
+                    description = "Natsu Hub webhook configurado!",
+                    color = 7815168,
+                    timestamp = DateTime.now():ToIsoDate()
+                }}
+            }
+            httpPostJson(Config.WebhookURL, HttpService:JSONEncode(payload))
+        end)
+    end)
+end
+
+-- ============================================================
+-- AUTO PLACE LOOP
+-- ============================================================
+local function AutoPlaceLoop()
+    while Config.AutoPlace do
+        task.wait(1.5)
+        local success, err = pcall(function()
+            if Config.IsStealing then return end
+            if Config.IsPlacing then return end
+            local EggCmds = require(ReplicatedStorage.Client.EggState)
+            local Assets = require(ReplicatedStorage.Data.Assets)
+
+            local myTruePlot = nil
+            local plotsFolder = workspace:FindFirstChild("Plots")
+            if plotsFolder then
+                for _, p in ipairs(plotsFolder:GetChildren()) do
+                    local sign = p:FindFirstChild("PlotSign")
+                    if sign then
+                        local pSign = sign:FindFirstChild("PlayerPlotSign")
+                        if pSign and pSign:FindFirstChild("Frame") and pSign.Frame:FindFirstChild("PlayerName") then
+                            local rawText = pSign.Frame.PlayerName.Text
+                            local cleanText = string.gsub(rawText, "<[^>]+>", "")
+                            if string.find(string.lower(cleanText), string.lower(LocalPlayer.Name)) or string.find(string.lower(cleanText), string.lower(LocalPlayer.DisplayName)) then
+                                myTruePlot = p
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            if not myTruePlot then return end
+
+            local ToUpdate = myTruePlot:FindFirstChild("ToUpdate")
+            local PetArea = ToUpdate and ToUpdate:FindFirstChild("PetArea")
+            local CenterPoint = myTruePlot:FindFirstChild("CenterPoint") or PetArea
+            if not PetArea then return end
+
+            local eggsToPlace = {}
+            local myEggs = EggCmds.GetOwnerRuntimeRecords(LocalPlayer.UserId)
+            local placedCount = 0
+            if type(myEggs) == "table" then
+                for uid, record in pairs(myEggs) do
+                    if record.Placement ~= nil then
+                        placedCount = placedCount + 1
+                    else
+                        local category = record.AssetCategory
+                        local categoryData = category and Assets.Directory[category]
+                        local rarity = "Unknown"
+                        if categoryData and categoryData.Rarity then
+                            local rObj = categoryData.Rarity
+                            rarity = rObj.DisplayName or rObj._id or rObj.Name or "Unknown"
+                        end
+                        local match = false
+                        if #Config.PlaceRarities == 0 or table.find(Config.PlaceRarities, "None") or table.find(Config.PlaceRarities, "All") then
+                            match = true
+                        else
+                            match = table.find(Config.PlaceRarities, rarity) ~= nil
+                        end
+                        if match then
+                            table.insert(eggsToPlace, { Uid = uid, Rarity = rarity })
+                        end
+                    end
+                end
+            end
+            if #eggsToPlace == 0 or placedCount >= 30 then return end
+
+            Config.IsPlacing = true
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum then Config.IsPlacing = false; return end
+
+            local placeTargetCF = PetArea.CFrame * CFrame.new(0, 3, 0)
+            pcall(function()
+                TweenMoveTo(hrp, hum, placeTargetCF, function() return not Config.AutoPlace end)
+            end)
+            task.wait(0.3)
+            if Config.IsStealing then Config.IsPlacing = false; return end
+
+            for _, eggInfo in ipairs(eggsToPlace) do
+                if not Config.AutoPlace then break end
+                if placedCount >= 30 then break end
+                if Config.IsStealing then break end
+
+                local eqSuccess = EggCmds.RequestEquipTool(eggInfo.Uid)
+                if eqSuccess then
+                    task.wait(0.15)
+                    local rx = math.random(-20, 20) / 10
+                    local rz = math.random(-20, 20) / 10
+                    local worldPos = PetArea.CFrame * Vector3.new(rx, 0, rz)
+                    local localPos = CenterPoint.CFrame:PointToObjectSpace(worldPos)
+                    local testCFrame = CFrame.new(localPos.X, -0.5, localPos.Z)
+                    local plSuccess = EggCmds.RequestPlaceEgg(eggInfo.Uid, testCFrame)
+                    if plSuccess then placedCount = placedCount + 1 end
+                    task.wait(0.15)
+                end
+            end
+            Config.IsPlacing = false
+        end)
+        if not success then
+            Config.IsPlacing = false
+        end
+    end
+end
+-- ============================================================
+-- AUTO HATCH LOOP
+-- ============================================================
+local function AutoHatchLoop()
+    task.spawn(function()
+        local failedHatchAttempts = {}
+        while Config.AutoHatch do
+            task.wait(2.5)
+            pcall(function()
+                local EggCmds = require(ReplicatedStorage.Client.EggState)
+                local myEggs = EggCmds.GetOwnerRuntimeRecords(LocalPlayer.UserId)
+                local eggsToHatch = {}
+                for uid, record in pairs(myEggs) do
+                    if record.Placement ~= nil then
+                        table.insert(eggsToHatch, uid)
+                    end
+                end
+                local now = os.time()
+                for _, uid in ipairs(eggsToHatch) do
+                    if not Config.AutoHatch then break end
+                    if Config.IsStealing then break end
+                    if failedHatchAttempts[uid] and now < failedHatchAttempts[uid] then continue end
+                    local success = EggCmds.RequestHatchEgg(uid)
+                    if success then
+                        EggCmds.RequestCompleteHatchEgg(uid)
+                        failedHatchAttempts[uid] = nil
+                        task.wait(0.1)
+                    else
+                        failedHatchAttempts[uid] = now + 15
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+-- ============================================================
+-- AUTO SELL PET LOOP
+-- ============================================================
+local sellNamesDropdown
+local sellRarityDropdown
+local sellEggRarityDropdown
+
+local isAutoSellRunning = false
+local function startAutoSellLoop()
+    if isAutoSellRunning then return end
+    isAutoSellRunning = true
+    task.spawn(function()
+        local Assets = require(ReplicatedStorage.Data.Assets)
+        local Save = require(ReplicatedStorage.Shared.Save)
+        local AssetRoster = require(ReplicatedStorage.Client.AssetRoster)
+        local Remotes = require(ReplicatedStorage.Shared.Remotes)
+
+        local function readPlacedUids()
+            local ok, runtimeRecords = pcall(function()
+                return AssetRoster.ReadOwnerPen(LocalPlayer.UserId)
+            end)
+            if not ok or type(runtimeRecords) ~= "table" then return nil end
+            local placed = {}
+            for key, rec in pairs(runtimeRecords) do
+                if type(key) == "string" then placed[key] = true end
+                if type(rec) == "table" and rec.UID then placed[rec.UID] = true end
+            end
+            return placed
+        end
+
+        while Config.AutoSell do
+            pcall(function()
+                if not autoSellCanRun() then return end
+                local sellNames = readDropdownFilter(sellNamesDropdown)
+                local sellRarities = readDropdownFilter(sellRarityDropdown)
+                if not sellNames or not sellRarities then return end
+
+                local mySave = Save.Get()
+                local myInventory = mySave and mySave.Inventory or {}
+                local placedUids = readPlacedUids()
+                if not placedUids then return end
+
+                local petsToSell = {}
+                for uid, record in pairs(myInventory) do
+                    if type(record) == "table" then
+                        local isPlaced = placedUids[uid] == true
+                        local isFavorite = record.IsFavorite == true
+                        local isEquipped = table.find(mySave.EquippedAssets or {}, uid) ~= nil
+                        local inFuse = record.InFuse == true
+                        local assetId = record.Category or record.id or record.AssetCategory or record.ItemId
+                        local categoryData = assetId and Assets.Directory[assetId]
+                        local petName = categoryData and (categoryData.DisplayName or categoryData._id or categoryData.Name) or "Unknown"
+                        local rarityObj = categoryData and categoryData.Rarity
+                        local rarity = rarityObj and (rarityObj.DisplayName or rarityObj._id or rarityObj.Name) or "Unknown"
+                        if petMatchesSellFilter(petName, rarity, sellNames, sellRarities)
+                            and not isFavorite and not isPlaced and not isEquipped and not inFuse then
+                            table.insert(petsToSell, { uid = uid, petName = petName })
+                        end
+                    end
+                end
+
+                for _, entry in ipairs(petsToSell) do
+                    if not autoSellCanRun() then break end
+                    local character = LocalPlayer.Character
+                    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                    local tool = nil
+                    for _, container in ipairs({ LocalPlayer.Backpack, character }) do
+                        if container then
+                            for _, candidate in ipairs(container:GetChildren()) do
+                                if candidate:IsA("Tool") and candidate:GetAttribute("UID") == entry.uid then
+                                    tool = candidate; break
+                                end
+                            end
+                        end
+                        if tool then break end
+                    end
+                    if tool and humanoid then
+                        humanoid:EquipTool(tool)
+                        task.wait(0.2)
+                        if autoSellCanRun() then
+                            Remotes.PetSatchel.SellPet:FireServer({ entry.uid })
+                            task.wait(0.05)
+                        end
+                    end
+                end
+            end)
+            task.wait(1.5)
+        end
+        isAutoSellRunning = false
+    end)
+end
+
+-- ============================================================
+-- AUTO SELL EGG LOOP
+-- ============================================================
+local isAutoSellEggRunning = false
+local function startAutoSellEggLoop()
+    if isAutoSellEggRunning then return end
+    isAutoSellEggRunning = true
+    task.spawn(function()
+        local Assets = require(ReplicatedStorage.Data.Assets).Directory
+        local EggState = require(ReplicatedStorage.Client.EggState)
+        local Remotes = require(ReplicatedStorage.Shared.Remotes)
+        local Save = require(ReplicatedStorage.Shared.Save)
+
+        while Config.AutoSellEgg do
+            pcall(function()
+                local rarities = readDropdownFilter(sellEggRarityDropdown)
+                local profile = Save.Get()
+                local inventory = profile and profile.EggInventory
+                if rarities and type(inventory) == "table" and autoSellCanRun() then
+                    for uid, record in pairs(inventory) do
+                        if not Config.AutoSellEgg or not autoSellCanRun() then break end
+                        local asset = type(record) == "table" and Assets[record.AssetCategory]
+                        local rarity = asset and asset.Rarity and (asset.Rarity.DisplayName or asset.Rarity._id)
+                        if record.Placement == nil and not hasMonstrousMutation(record)
+                            and eggMatchesSellFilter(rarity or "Unknown", rarities) then
+                            local equipped = EggState.WearEggTool(uid)
+                            if equipped then
+                                task.wait(0.2)
+                                if autoSellCanRun() then
+                                    Remotes.PetSatchel.SellPet:FireServer({ uid })
+                                    task.wait(0.2)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            task.wait(1)
+        end
+        isAutoSellEggRunning = false
+    end)
+end
+-- ============================================================
+-- UI - ABAS
+-- ============================================================
+local NatsuState = {
+    SelectedEggUid = nil,
+    Running = false,
+    EggsCache = {},
+    EggOrder = {},
+}
+
+local RARITY_COLORS = {
+    Common = Color3.fromRGB(180, 180, 180),
+    Uncommon = Color3.fromRGB(80, 200, 120),
+    Rare = Color3.fromRGB(80, 150, 255),
+    Epic = Color3.fromRGB(180, 90, 255),
+    Legendary = Color3.fromRGB(255, 180, 60),
+    Mythic = Color3.fromRGB(255, 90, 90),
+    Cosmic = Color3.fromRGB(255, 100, 220),
+    Secret = Color3.fromRGB(255, 220, 100),
+    Eternal = Color3.fromRGB(120, 255, 220),
+    Divine = Color3.fromRGB(255, 255, 180),
+}
+
+local RARITY_RANK = {
+    Common = 1, Uncommon = 2, Rare = 3, Epic = 4,
+    Legendary = 5, Mythic = 6, Cosmic = 7, Secret = 8,
+    Eternal = 9, Divine = 10,
+}
+
+local NatsuAssets = require(ReplicatedStorage.Data.Assets).Directory
+local NatsuEggCmds = require(ReplicatedStorage.Client.EggState)
+
+-- ===== MAIN TAB =====
+local MainTab = Tabs:AddTab({ Name = "Main", Icon = "house" })
+
+local FarmSection = MainTab:AddSection({
+    Title = "Auto Farm",
+    Layout = "Columns",
+    ColumnGap = 6,
+    ItemGap = 2
+})
+
+FarmSection:AddToggle({
+    Title = "Auto Steal",
+    Column = "Left",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        Config.AutoSteal = val
+        if val and UI_LOADED then
+            startGlobalMovementProtection()
+            if icRunner then icRunner:setEnabled(true) end
+        elseif not fieldStealEnabled() then
+            Config.IsStealing = false
+            if icRunner then icRunner:setEnabled(false) end
+            stopGlobalMovementProtection()
+        end
+    end
+})
+
+FarmSection:AddToggle({
+    Title = "Auto Treadmill",
+    Column = "Right",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        Config.AutoTreadmillIdle = val
+        if not val then
+            treadmillIdleMountRequested = false
+            if Config.AntiTreadmillMount and treadmillActiveId ~= nil then
+                task.spawn(requestTreadmillUnequip)
+            end
+        end
+    end
+})
+
+FarmSection:AddToggle({
+    Title = "Anti Knockback",
+    Column = "Left",
+    Row = 2,
+    Default = true,
+    Callback = function(val)
+        Config.AntiGuardKnockback = val
+        local char = LocalPlayer.Character
+        setGuardNoCollide(char, val)
+        setGuardRagdollImmune(char and char:FindFirstChildOfClass("Humanoid"), val)
+    end
+})
+
+FarmSection:AddToggle({
+    Title = "Anti Treadmill",
+    Column = "Right",
+    Row = 2,
+    Default = true,
+    Callback = function(val) Config.AntiTreadmillMount = val end
+})
+
+FarmSection:AddInput({
+    Title = "Speed",
+    Content = "10 = 100 studs/s, 100 = 1000 studs/s",
+    Column = "Left",
+    Row = 3,
+    Default = tostring(Config.TweenSpeedMultiplier),
+    Callback = function(val)
+        local num = tonumber(val)
+        if num then Config.TweenSpeedMultiplier = math.clamp(num, 1, 100) end
+    end
+})
+
+FarmSection:AddInput({
+    Title = "Steal By Value",
+    Content = "Minimo (k, m, b)",
+    Column = "Right",
+    Row = 3,
+    Default = "0",
+    Callback = function(val) Config:applyStealValueInput(val) end
+})
+
+local modeDropdown
+modeDropdown = FarmSection:AddDropdown({
+    Title = "Steal Mode",
+    Column = "Full",
+    Row = 4,
+    Options = {"Instant", "Tween"},
+    Default = {"Instant"},
+    Multi = false,
+    Callback = function(val)
+        local arr = handleDropdownChange(val, modeDropdown)
+        Config.StealMode = tostring((type(arr)=="table" and arr[1]) or val or "Instant")
+    end
+})
+
+local nameDropdown
+nameDropdown = FarmSection:AddDropdown({
+    Title = "Filter By Egg Name",
+    Column = "Full",
+    Row = 5,
+    Options = {"None", "All"},
+    Default = {"None"},
+    Multi = true,
+    Callback = function(val)
+        Config.StealNamesFilter = handleDropdownChange(val, nameDropdown)
+    end
+})
+
+local areaDropdown
+areaDropdown = FarmSection:AddDropdown({
+    Title = "Select Area",
+    Column = "Full",
+    Row = 6,
+    Options = {"None", "All", "Lake", "Jungle", "Desert", "Snow", "Volcano", "Abyss Ocean", "Prehistoric", "Cosmic", "Cherry Blossom", "Titan Temple"},
+    Default = {"None"},
+    Multi = true,
+    Callback = function(val)
+        Config.StealAreas = handleDropdownChange(val, areaDropdown)
+    end
+})
+
+local rarityDropdown
+rarityDropdown = FarmSection:AddDropdown({
+    Title = "Filter By Rarity",
+    Column = "Full",
+    Row = 7,
+    Options = {"None", "All", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine"},
+    Default = {"None"},
+    Multi = true,
+    Callback = function(val)
+        Config.StealRarities = handleDropdownChange(val, rarityDropdown)
+    end
+})
+
+-- ===== EGG PANEL (dentro do Main) =====
+local PanelSection = MainTab:AddSection({
+    Title = "Egg Panel",
+    Layout = "Grid",
+    ItemGap = 4
+})
+
+local eggPanelGui = nil
+local eggListFrame = nil
+local eggTitleLabel = nil
+local eggScrollFrame = nil
+
+local function buildEggPanel()
+    if eggPanelGui then return end
+    eggPanelGui = Instance.new("ScreenGui")
+    eggPanelGui.Name = "NatsuEggPanel"
+    eggPanelGui.ResetOnSpawn = false
+    eggPanelGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    eggPanelGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromOffset(360, 400)
+    frame.Position = UDim2.new(1, -380, 0, 100)
+    frame.BackgroundColor3 = Color3.fromRGB(16, 14, 24)
+    frame.BorderSizePixel = 0
+    frame.Parent = eggPanelGui
+    local fc = Instance.new("UICorner"); fc.CornerRadius = UDim.new(0, 12); fc.Parent = frame
+    local fs = Instance.new("UIStroke"); fs.Color = Color3.fromRGB(125, 55, 220); fs.Thickness = 1.5; fs.Parent = frame
+
+    local drag = Instance.new("TextButton")
+    drag.Size = UDim2.new(1, 0, 0, 32)
+    drag.BackgroundColor3 = Color3.fromRGB(23, 20, 32)
+    drag.Text = "  EGG PANEL"
+    drag.TextColor3 = Color3.fromRGB(210, 150, 255)
+    drag.TextSize = 13
+    drag.Font = Enum.Font.GothamBold
+    drag.TextXAlignment = Enum.TextXAlignment.Left
+    drag.AutoButtonColor = false
+    drag.Parent = frame
+    local dc = Instance.new("UICorner"); dc.CornerRadius = UDim.new(0, 12); dc.Parent = drag
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.fromOffset(24, 24)
+    closeBtn.Position = UDim2.new(1, -28, 0, 4)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(60, 30, 40)
+    closeBtn.Text = "X"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 200, 200)
+    closeBtn.TextSize = 12
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.AutoButtonColor = false
+    closeBtn.Parent = drag
+    local cbc = Instance.new("UICorner"); cbc.CornerRadius = UDim.new(0, 6); cbc.Parent = closeBtn
+    closeBtn.MouseButton1Click:Connect(function()
+        frame.Visible = false
+    end)
+
+    eggTitleLabel = Instance.new("TextLabel")
+    eggTitleLabel.Size = UDim2.new(1, -20, 0, 20)
+    eggTitleLabel.Position = UDim2.fromOffset(10, 36)
+    eggTitleLabel.BackgroundTransparency = 1
+    eggTitleLabel.Text = "Ovos no campo (0)"
+    eggTitleLabel.TextColor3 = Color3.fromRGB(220, 220, 230)
+    eggTitleLabel.TextSize = 12
+    eggTitleLabel.Font = Enum.Font.GothamBold
+    eggTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    eggTitleLabel.Parent = frame
+
+    eggScrollFrame = Instance.new("ScrollingFrame")
+    eggScrollFrame.Size = UDim2.new(1, -20, 1, -68)
+    eggScrollFrame.Position = UDim2.fromOffset(10, 58)
+    eggScrollFrame.BackgroundColor3 = Color3.fromRGB(20, 18, 30)
+    eggScrollFrame.BorderSizePixel = 0
+    eggScrollFrame.ScrollBarThickness = 4
+    eggScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(125, 55, 220)
+    eggScrollFrame.CanvasSize = UDim2.new(0,0,0,0)
+    eggScrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    eggScrollFrame.Parent = frame
+    local sc = Instance.new("UICorner"); sc.CornerRadius = UDim.new(0, 8); sc.Parent = eggScrollFrame
+    local sl = Instance.new("UIListLayout"); sl.Padding = UDim.new(0, 4); sl.Parent = eggScrollFrame
+    local sp = Instance.new("UIPadding")
+    sp.PaddingTop = UDim.new(0, 6); sp.PaddingBottom = UDim.new(0, 6)
+    sp.PaddingLeft = UDim.new(0, 6); sp.PaddingRight = UDim.new(0, 6)
+    sp.Parent = eggScrollFrame
+
+    -- Drag
+    local dragging, dragStart, startPos
+    drag.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    drag.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    eggListFrame = frame
+end
+
+local function getEggInfo(record)
+    local assetData = NatsuAssets[record.AssetCategory]
+    local petName = (assetData and assetData.DisplayName) or record.AssetCategory or "?"
+    local eggName = assetData and assetData.Egg and assetData.Egg.DisplayName or (petName .. " Egg")
+    local rarityObj = assetData and assetData.Rarity
+    local rarityName = rarityObj and (rarityObj.DisplayName or rarityObj._id) or "Common"
+    return {
+        eggName = eggName,
+        rarityName = rarityName,
+        areaName = record.AreaId or "?",
+        color = RARITY_COLORS[rarityName] or Color3.fromRGB(180,180,180),
+    }
+end
+
+local function refreshEggPanel()
+    if not eggScrollFrame then return end
+    for _, c in ipairs(eggScrollFrame:GetChildren()) do
+        if c:IsA("Frame") or c:IsA("TextButton") then c:Destroy() end
+    end
+
+    local snapshot = NatsuEggCmds.ReadFieldEggs()
+    local list = {}
+    local cache = {}
+    if snapshot and snapshot.Records then
+        for _, rec in pairs(snapshot.Records) do
+            if rec.State == "Slot" or rec.State == "Dropped" then
+                local info = getEggInfo(rec)
+                local rank = RARITY_RANK[info.rarityName] or 0
+                cache[rec.Uid] = { record = rec, info = info, rank = rank }
+                table.insert(list, rec.Uid)
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        return (cache[a] and cache[a].rank or 0) > (cache[b] and cache[b].rank or 0)
+    end)
+
+    NatsuState.EggsCache = cache
+    NatsuState.EggOrder = list
+    if eggTitleLabel then
+        eggTitleLabel.Text = "Ovos no campo (" .. #list .. ")"
+    end
+
+    for _, uid in ipairs(list) do
+        local entry = cache[uid]
+        if entry then
+            local info = entry.info
+            local card = Instance.new("Frame")
+            card.Size = UDim2.new(1, 0, 0, 46)
+            card.BackgroundColor3 = Color3.fromRGB(28, 24, 40)
+            card.BorderSizePixel = 0
+            card.Parent = eggScrollFrame
+            local cc = Instance.new("UICorner"); cc.CornerRadius = UDim.new(0,7); cc.Parent = card
+
+            local bar = Instance.new("Frame")
+            bar.Size = UDim2.new(0,4,1,-8)
+            bar.Position = UDim2.new(0,0,0,4)
+            bar.BackgroundColor3 = info.color
+            bar.BorderSizePixel = 0
+            bar.Parent = card
+            local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(1,0); bc.Parent = bar
+
+            local nameLbl = Instance.new("TextLabel")
+            nameLbl.Size = UDim2.new(1, -140, 0, 16)
+            nameLbl.Position = UDim2.fromOffset(12, 4)
+            nameLbl.BackgroundTransparency = 1
+            nameLbl.Text = info.eggName
+            nameLbl.TextColor3 = Color3.fromRGB(235,235,245)
+            nameLbl.TextSize = 12
+            nameLbl.Font = Enum.Font.GothamBold
+            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+            nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+            nameLbl.Parent = card
+
+            local subLbl = Instance.new("TextLabel")
+            subLbl.Size = UDim2.new(1, -140, 0, 14)
+            subLbl.Position = UDim2.fromOffset(12, 22)
+            subLbl.BackgroundTransparency = 1
+            subLbl.Text = info.areaName .. " - " .. info.rarityName
+            subLbl.TextColor3 = info.color
+            subLbl.TextSize = 10
+            subLbl.Font = Enum.Font.Gotham
+            subLbl.TextXAlignment = Enum.TextXAlignment.Left
+            subLbl.Parent = card
+
+            local selBtn = Instance.new("TextButton")
+            selBtn.Size = UDim2.fromOffset(50, 20)
+            selBtn.Position = UDim2.new(1, -116, 0, 4)
+            selBtn.BackgroundColor3 = Color3.fromRGB(90, 50, 160)
+            selBtn.Text = "Sel"
+            selBtn.TextColor3 = Color3.fromRGB(240,230,255)
+            selBtn.TextSize = 11
+            selBtn.Font = Enum.Font.GothamBold
+            selBtn.AutoButtonColor = false
+            selBtn.Parent = card
+            local sbc = Instance.new("UICorner"); sbc.CornerRadius = UDim.new(0,5); sbc.Parent = selBtn
+
+            local gotoBtn = Instance.new("TextButton")
+            gotoBtn.Size = UDim2.fromOffset(50, 20)
+            gotoBtn.Position = UDim2.new(1, -60, 0, 4)
+            gotoBtn.BackgroundColor3 = Color3.fromRGB(30, 100, 80)
+            gotoBtn.Text = "Goto"
+            gotoBtn.TextColor3 = Color3.fromRGB(220,255,240)
+            gotoBtn.TextSize = 11
+            gotoBtn.Font = Enum.Font.GothamBold
+            gotoBtn.AutoButtonColor = false
+            gotoBtn.Parent = card
+            local gbc = Instance.new("UICorner"); gbc.CornerRadius = UDim.new(0,5); gbc.Parent = gotoBtn
+
+            selBtn.MouseButton1Click:Connect(function()
+                local rec = entry.record
+                Config.StealAreas = {rec.AreaId or "None"}
+                Config.StealNamesFilter = {rec.AssetCategory or "None"}
+                NatsuState.SelectedEggUid = uid
+            end)
+
+            gotoBtn.MouseButton1Click:Connect(function()
+                local char = LocalPlayer.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                local hum = char and char:FindFirstChildOfClass("Humanoid")
+                if not root or not hum then return end
+                local rec = NatsuEggCmds.ReadFieldEgg(uid)
+                if not rec or typeof(rec.BottomCFrame) ~= "CFrame" then return end
+                task.spawn(function()
+                    local dest = CFrame.new(rec.BottomCFrame.Position + Vector3.new(0, 3.5, 0))
+                    TweenMoveTo(root, hum, dest, function() return false end, false)
+                end)
+            end)
+        end
+    end
+end
+
+PanelSection:AddToggle({
+    Title = "Show Egg Panel",
+    Content = "Abre painel com lista de ovos",
+    Column = "Full",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        if val then
+            buildEggPanel()
+            if eggPanelGui then
+                for _, c in ipairs(eggPanelGui:GetChildren()) do
+                    if c:IsA("Frame") then c.Visible = true end
+                end
+            end
+            task.spawn(function()
+                while eggPanelGui and Config.EggPanelOpen ~= false do
+                    pcall(refreshEggPanel)
+                    task.wait(3)
+                end
+            end)
+        else
+            if eggPanelGui then
+                for _, c in ipairs(eggPanelGui:GetChildren()) do
+                    if c:IsA("Frame") then c.Visible = false end
+                end
+            end
+        end
+    end
+})
+
+-- ===== AUTO TAB =====
+local AutoTab = Tabs:AddTab({ Name = "Auto", Icon = "repeat-2" })
+
+local PlaceSection = AutoTab:AddSection({ Title = "Egg Automation", Layout = "Columns", ColumnGap = 6, ItemGap = 2 })
+
+PlaceSection:AddToggle({
+    Title = "Auto Place Egg",
+    Column = "Left",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        Config.AutoPlace = val
+        if val and UI_LOADED then task.spawn(AutoPlaceLoop) end
+    end
+})
+
+PlaceSection:AddToggle({
+    Title = "Auto Hatch Egg",
+    Column = "Right",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        Config.AutoHatch = val
+        if val and UI_LOADED then AutoHatchLoop() end
+    end
+})
+
+local placeDropdown
+placeDropdown = PlaceSection:AddDropdown({
+    Title = "Place Egg Rarity",
+    Column = "Full",
+    Row = 2,
+    Options = {"None", "All", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine"},
+    Default = {"None"},
+    Multi = true,
+    Callback = function(val)
+        Config.PlaceRarities = handleDropdownChange(val, placeDropdown)
+    end
+})
+
+local SellSection = AutoTab:AddSection({ Title = "Pet Selling", Layout = "Columns", ColumnGap = 6, ItemGap = 2 })
+
+SellSection:AddToggle({
+    Title = "Auto Sell Pet",
+    Column = "Left",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        Config.AutoSell = val
+        if val and UI_LOADED then startAutoSellLoop() end
+    end
+})
+
+SellSection:AddToggle({
+    Title = "Sell All Pets",
+    Column = "Right",
+    Row = 1,
+    Default = false,
+    Callback = function(val) Config.SellAll = val end
+})
+
+local petNamesList = {"None", "All"}
+pcall(function()
+    local Assets = require(ReplicatedStorage.Data.Assets)
+    local seen = {}
+    for k, v in pairs(Assets.Directory) do
+        if type(v) == "table" and (v.DisplayName or v._id or v.Name) then
+            local disp = v.DisplayName or v._id or v.Name
+            if not seen[disp] then seen[disp] = true; table.insert(petNamesList, disp) end
+        end
+    end
+    table.sort(petNamesList)
+end)
+
+sellNamesDropdown = SellSection:AddDropdown({
+    Title = "Pet Name Filter",
+    Column = "Full",
+    Row = 2,
+    Options = petNamesList,
+    Default = {"None"},
+    Multi = true,
+    Callback = function(val)
+        Config.SellNames = handleDropdownChange(val, sellNamesDropdown)
+    end
+})
+
+sellRarityDropdown = SellSection:AddDropdown({
+    Title = "Pet Rarity Filter",
+    Column = "Full",
+    Row = 3,
+    Options = {"None", "All", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine"},
+    Default = {"None"},
+    Multi = true,
+    Callback = function(val)
+        Config.SellRarities = handleDropdownChange(val, sellRarityDropdown)
+    end
+})
+
+local SellEggSection = AutoTab:AddSection({ Title = "Egg Selling", Layout = "Grid", ItemGap = 4 })
+
+SellEggSection:AddToggle({
+    Title = "Auto Sell Egg",
+    Column = "Full",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        Config.AutoSellEgg = val
+        if val and UI_LOADED then startAutoSellEggLoop() end
+    end
+})
+
+sellEggRarityDropdown = SellEggSection:AddDropdown({
+    Title = "Egg Rarity Filter",
+    Column = "Full",
+    Row = 2,
+    Options = {"None", "All", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Cosmic", "Secret", "Eternal", "Divine"},
+    Default = {"None"},
+    Multi = true,
+    Callback = function(val)
+        Config.SellEggRarities = handleDropdownChange(val, sellEggRarityDropdown)
+    end
+})
+
+-- ===== MISC TAB =====
+local MiscTab = Tabs:AddTab({ Name = "Misc", Icon = "settings" })
+
+local PerfSection = MiscTab:AddSection({ Title = "Performance", Layout = "Grid", ItemGap = 4 })
+
+PerfSection:AddToggle({
+    Title = "Boost FPS",
+    Content = "Reduz graficos e esconde coisas",
+    Column = "Full",
+    Row = 1,
+    Default = false,
+    Callback = function(val)
+        if val then ApplyFPSBoost() end
+    end
+})
+
+local MiscSection = MiscTab:AddSection({ Title = "Player Settings", Layout = "Grid", ItemGap = 4 })
+
+MiscSection:AddToggle({
+    Title = "Anti AFK",
+    Column = "Full",
+    Row = 1,
+    Default = true,
+        Callback = function(val)
+        Config.AntiAFK = val
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            LocalPlayer.Idled:Connect(function()
+                if Config.AntiAFK then
+                    vu:CaptureController()
+                    vu:ClickButton2(Vector2.new())
+                end
+            end)
+        end)
+    end
+})
+
+-- ===== WEBHOOK TAB =====
+local WebhookTab = Tabs:AddTab({ Name = "Webhook", Icon = "webhook" })
+
+local WebhookSection = WebhookTab:AddSection({
+    Title = "Discord Webhook",
+    Layout = "Grid",
+    ItemGap = 4
+})
+
+WebhookSection:AddParagraph({
+    Title = "Egg Claim Notifications",
+    Content = "Envia log pro Discord quando um ovo e pego.",
+    Icon = "send",
+    Column = "Full",
+    Row = 1
+})
+
+WebhookSection:AddToggle({
+    Title = "Webhook Logs",
+    Column = "Full",
+    Row = 2,
+    Default = false,
+    Callback = function(val)
+        Config.WebhookEnabled = val
+    end
+})
+
+WebhookSection:AddInput({
+    Title = "Webhook URL",
+    Column = "Full",
+    Row = 3,
+    Default = "",
+    Callback = function(val)
+        Config.WebhookURL = tostring(val or "")
+    end
+})
+
+WebhookSection:AddButton({
+    Title = "Test Webhook",
+    Icon = "send-horizontal",
+    Column = "Full",
+    Row = 4,
+    Callback = function()
+        if type(Config.WebhookURL) ~= "string" or Config.WebhookURL == "" then
+            Library:MakeNotify({
+                Title = "Webhook",
+                Description = "URL vazia",
+                Content = "Coloca a URL primeiro.",
+                Color = Color3.fromRGB(220, 170, 80),
+                Delay = 3
+            })
+            return
+        end
+        task.spawn(function()
+            local ok, err = pcall(function()
+                local payload = {
+                    username = "Natsu Hub",
+                    embeds = {{
+                        title = "Webhook Test",
+                        description = "Natsu Hub webhook configurado!",
+                        color = 7815168,
+                        timestamp = DateTime.now():ToIsoDate()
+                    }}
+                }
+                httpPostJson(Config.WebhookURL, HttpService:JSONEncode(payload))
+            end)
+            Library:MakeNotify({
+                Title = "Webhook",
+                Description = ok and "OK" or "Falhou",
+                Content = ok and "Enviado!" or tostring(err),
+                Color = ok and Color3.fromRGB(60, 230, 140) or Color3.fromRGB(240, 65, 80),
+                Delay = 3
+            })
+        end)
+    end
+})
+
+-- Hook de claim pra webhook
+pcall(function()
+    local EggCmds = require(ReplicatedStorage.Client.EggState)
+    EggCmds.AreaEggClaimed:Connect(function(feedback)
+        if not Config.WebhookEnabled then return end
+        if type(Config.WebhookURL) ~= "string" or Config.WebhookURL == "" then return end
+        task.spawn(function()
+            pcall(function()
+                local embed = {
+                    author = { name = LocalPlayer.Name },
+                    description = "Ovo pego: " .. tostring(feedback and feedback.Rarity or "?"),
+                    color = 7815168,
+                    timestamp = DateTime.now():ToIsoDate()
+                }
+                local payload = { username = "Natsu Hub", embeds = { embed } }
+                httpPostJson(Config.WebhookURL, HttpService:JSONEncode(payload))
+            end)
+        end)
+    end)
+end)
+
+-- ============================================================
+-- FINALIZACAO
+-- ============================================================
+task.spawn(function()
+    task.wait(2)
+    UI_LOADED = true
+end)
+
+print("[Natsu Hub] Carregado com sucesso!")
+      
