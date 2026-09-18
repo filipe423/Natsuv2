@@ -2283,17 +2283,25 @@ end
 -- ETAPA 3: Chama a remote da galinha (força o strike)
 natsuStatus.Text = "Provocando a galinha..."
 natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
-pcall(function()
-    local strikeRemote = ReplicatedStorage:FindFirstChild("Packages")
-        and ReplicatedStorage.Packages:FindFirstChild("Networking")
-        and ReplicatedStorage.Packages.Networking:FindFirstChild("RE/GuardPatrol/ForestStrike")
-    if strikeRemote and guardHrp then
+local strikeRemote = ReplicatedStorage:FindFirstChild("Packages")
+    and ReplicatedStorage.Packages:FindFirstChild("Networking")
+    and ReplicatedStorage.Packages.Networking:FindFirstChild("RE/GuardPatrol/ForestStrike")
+
+print("[NATSU DEBUG] strikeRemote existe?", strikeRemote ~= nil)
+print("[NATSU DEBUG] guardHrp existe?", guardHrp ~= nil)
+print("[NATSU DEBUG] forestEgg existe?", forestEgg ~= nil)
+
+if strikeRemote and guardHrp then
+    local ok, err = pcall(function()
         strikeRemote:FireServer({
             EggUid = forestEgg.Uid,
             GuardCFrame = guardHrp.CFrame
         })
-    end
-end)
+    end)
+    print("[NATSU DEBUG] FireServer ok?", ok, "err:", err)
+else
+    print("[NATSU DEBUG] Nao chamou strike! Faltou remote ou guard")
+				end
 
 -- ETAPA 4: Espera o ragdoll ativar (máximo 5s)
 natsuStatus.Text = "Esperando o ragdoll..."
