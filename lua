@@ -2307,41 +2307,50 @@ pcall(function()
     end
 end)
 
--- 3) Espera o ragdoll ativar + levanta do chão
+-- ETAPA 3: Força o ragdoll e trava no lugar
+natsuStatus.Text = "Ativando ragdoll..."
+natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
+
+-- Salva a posição atual pra travar aí
 local char = LocalPlayer.Character
 local root = char and char:FindFirstChild("HumanoidRootPart")
 local hum = char and char:FindFirstChildOfClass("Humanoid")
 
+local lockedPos = root and root.CFrame or nil
+
+-- 1) Chama a remote da galinha (strike)
+pcall(function()
+    local strikeRemote = ReplicatedStorage:FindFirstChild("Packages")
+        and ReplicatedStorage.Packages:FindFirstChild("Networking")
+        and ReplicatedStorage.Packages.Networking:FindFirstChild("RE/GuardPatrol/ForestStrike")
+    if strikeRemote and guardHrp and forestEgg then
+        strikeRemote:FireServer({
+            EggUid = forestEgg.Uid,
+            GuardCFrame = guardHrp.CFrame
+        })
+    end
+end)
+
+-- 2) Espera o ragdoll ativar e TRAVA o personagem no lugar
 local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
 local waited = 0
-while NatsuState.Running and waited < 5 do
+while NatsuState.Running and waited < 4 do
     local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    
+    -- Trava o personagem na posição salva (não deixa cair/volar)
+    if root and root.Parent and lockedPos then
+        pcall(function()
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            root.CFrame = lockedPos
+        end)
+    end
+    
     if tEnd > tEnd0 + 0.3 then
         break
     end
-    -- Levanta o personagem do chão durante o ragdoll
-    if root and hum then
-        pcall(function()
-            -- Sobe o personagem 5 studs e trava lá
-            local newPos = root.Position + Vector3.new(0, 5, 0)
-            root.CFrame = CFrame.new(newPos)
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-            -- Evita cair pra baixo do chão
-            root.CustomPhysicalProperties = PhysicalProperties.new(0.01, 0.3, 0.5, 1, 1)
-        end)
-    end
     task.wait(0.05)
     waited = waited + 0.05
-end
-
--- Continua segurando em cima do chão
-if root and hum then
-    pcall(function()
-        root.CFrame = CFrame.new(root.Position + Vector3.new(0, 3, 0))
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-    end)
 				end
 
 -- ETAPA 4: Espera o ragdoll ativar (máximo 5s)
