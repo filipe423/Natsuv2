@@ -2280,28 +2280,46 @@ if not pegouIsca then
     return
 end
 
--- ETAPA 3: Chama a remote da galinha (força o strike)
-natsuStatus.Text = "Provocando a galinha..."
+-- ETAPA 3: Força o ragdoll (faz o personagem cair no chão)
+natsuStatus.Text = "Ativando ragdoll..."
 natsuStatus.TextColor3 = Color3.fromRGB(255, 150, 80)
-local strikeRemote = ReplicatedStorage:FindFirstChild("Packages")
-    and ReplicatedStorage.Packages:FindFirstChild("Networking")
-    and ReplicatedStorage.Packages.Networking:FindFirstChild("RE/GuardPatrol/ForestStrike")
 
-print("[NATSU DEBUG] strikeRemote existe?", strikeRemote ~= nil)
-print("[NATSU DEBUG] guardHrp existe?", guardHrp ~= nil)
-print("[NATSU DEBUG] forestEgg existe?", forestEgg ~= nil)
-
-if strikeRemote and guardHrp then
-    local ok, err = pcall(function()
+-- 1) Tenta pela remote da galinha (ForestStrike)
+pcall(function()
+    local strikeRemote = ReplicatedStorage:FindFirstChild("Packages")
+        and ReplicatedStorage.Packages:FindFirstChild("Networking")
+        and ReplicatedStorage.Packages.Networking:FindFirstChild("RE/GuardPatrol/ForestStrike")
+    if strikeRemote and guardHrp then
         strikeRemote:FireServer({
             EggUid = forestEgg.Uid,
             GuardCFrame = guardHrp.CFrame
         })
-    end)
-    print("[NATSU DEBUG] FireServer ok?", ok, "err:", err)
-else
-    print("[NATSU DEBUG] Nao chamou strike! Faltou remote ou guard")
-				end
+    end
+end)
+
+-- 2) Força o ragdoll manualmente pelo módulo Ragdoll
+pcall(function()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum:ChangeState(Enum.HumanoidStateType.Physics)
+        hum.PlatformStand = true
+    end
+end)
+
+-- 3) Espera o ragdoll ativar de verdade
+local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+local waited = 0
+while NatsuState.Running and waited < 8 do
+    local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+    if tEnd > tEnd0 + 0.3 then
+        break
+    end
+    task.wait(0.15)
+    waited = waited + 0.15
+end
+
+task.wait(0.3)
 
 -- ETAPA 4: Espera o ragdoll ativar (máximo 5s)
 natsuStatus.Text = "Esperando o ragdoll..."
