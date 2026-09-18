@@ -1341,33 +1341,18 @@ function InstantCarry:_startHunt()
     if not dest then self:_finish("Target destination unavailable"); return end
 
     icSetAnchored(false)
-    self:_clearArrivalHold()
-    icTeleportHops(root, dest)
+self:_clearArrivalHold()
 
-    -- 1) Força posição por 0.8s (ragdoll não puxa)
-    local holdConn
-    local holdUntil = os.clock() + 0.8
-    holdConn = RunService.Heartbeat:Connect(function()
-        if not self.enabled or self.destroyed then
-            if holdConn then holdConn:Disconnect() end
-            return
-        end
-        if self.carryActive or os.clock() >= holdUntil then
-            if holdConn then holdConn:Disconnect() end
-            return
-        end
-        if self.activeTarget and self.activeTarget.BottomCFrame then
-            local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-            if r then
-                local d = CFrame.new(self.activeTarget.BottomCFrame.Position + Vector3.new(0, 3.5, 0))
-                pcall(function()
-                    r.AssemblyLinearVelocity = Vector3.zero
-                    r.AssemblyAngularVelocity = Vector3.zero
-                    r.CFrame = d
-                end)
-            end
-        end
-    end)
+-- ANCORA pra ragdoll NÃO puxar e teleporta
+pcall(function() root.Anchored = true end)
+task.wait(0.05)
+pcall(function()
+    root.CFrame = dest
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+end)
+task.wait(0.1)
+pcall(function() root.Anchored = false end)
 
     -- 2) Slot key
     local slotKey = nil
