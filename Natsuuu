@@ -1327,75 +1327,56 @@ function InstantCarry:_startHunt()
     self:_clearArrivalHold()
     icTeleportHops(root, dest)
 
-    -- 1) Prepara o slotKey
-local slotKey = nil
-if IC_MODULES.SlotIdentity then
-    local looksFirst = IC_MODULES.SlotIdentity.LooksLikeFirstAreaUid or IC_MODULES.SlotIdentity.IsFirstAreaUid
-    local buildKey = IC_MODULES.SlotIdentity.SlotKey or IC_MODULES.SlotIdentity.BuildSlotKey
-    if looksFirst and buildKey then
-        local ok, isFirst = pcall(looksFirst, tostring(self.activeTarget.Uid))
-        if ok and isFirst and self.activeTarget.AreaId and self.activeTarget.NestId then
-            local ok2, built = pcall(buildKey, self.activeTarget.AreaId, self.activeTarget.NestId)
-            if ok2 then slotKey = built end
-        end
-    end
-end
+    -- 1) Força posição por 0.6s (ragdoll não puxa)[span_0](start_span)[span_0](end_span)
+local holdConn[span_1](start_span)[span_1](end_span)
+local holdUntil = os.clock() + 0.6[span_2](start_span)[span_2](end_span)
+holdConn = RunService.Heartbeat:Connect(function()[span_3](start_span)[span_3](end_span)
+    if not self.enabled or self.destroyed then[span_4](start_span)[span_4](end_span)
+        if holdConn then holdConn:Disconnect() end[span_5](start_span)[span_5](end_span)
+        return[span_6](start_span)[span_6](end_span)
+    end[span_7](start_span)[span_7](end_span)
+    if os.clock() >= holdUntil then[span_8](start_span)[span_8](end_span)
+        if holdConn then holdConn:Disconnect() end[span_9](start_span)[span_9](end_span)
+        return[span_10](start_span)[span_10](end_span)
+    end[span_11](start_span)[span_11](end_span)
+    if self.activeTarget and self.activeTarget.BottomCFrame then[span_12](start_span)[span_12](end_span)
+        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")[span_13](start_span)[span_13](end_span)
+        if r then[span_14](start_span)[span_14](end_span)
+            local d = CFrame.new(self.activeTarget.BottomCFrame.Position + Vector3.new(0, 3.5, 0))[span_15](start_span)[span_15](end_span)
+            pcall(function()[span_16](start_span)[span_16](end_span)
+                r.AssemblyLinearVelocity = Vector3.zero[span_17](start_span)[span_17](end_span)
+                r.AssemblyAngularVelocity = Vector3.zero[span_18](start_span)[span_18](end_span)
+                r.CFrame = d[span_19](start_span)[span_19](end_span)
+            end)[span_20](start_span)[span_20](end_span)
+        end[span_21](start_span)[span_21](end_span)
+    end[span_22](start_span)[span_22](end_span)
+end)[span_23](start_span)[span_23](end_span)
 
--- 2) FORÇA POSIÇÃO + TENTA PEGAR AO MESMO TEMPO (em paralelo)
-local pego = false
-local holdConn
-local holdUntil = os.clock() + 1.2
+-- 2) Espera 0.6s e para de força[span_24](start_span)[span_24](end_span)
+task.wait(0.6)[span_25](start_span)[span_25](end_span)
+if holdConn then holdConn:Disconnect() end[span_26](start_span)[span_26](end_span)
+if not self.enabled or self.destroyed then return end[span_27](start_span)[span_27](end_span)
 
--- Loop paralelo que tenta pegar JÁ (sem esperar)
-task.spawn(function()
-    for i = 1, 30 do
-        if not self.enabled or self.destroyed then return end
-        if self.carryActive then
-            pego = true
-            return
-        end
-        pcall(icRequestFieldEggCarry, self.activeTarget.Uid, slotKey)
-        task.wait(0.06)
-    end
-end)
+-- 3) Tenta pegar o ovo[span_28](start_span)[span_28](end_span)
+self:_setStatus("Pegando ovo...")[span_29](start_span)[span_29](end_span)
+local slotKey = nil[span_30](start_span)[span_30](end_span)
+if IC_MODULES.SlotIdentity then[span_31](start_span)[span_31](end_span)
+    local looksFirst = IC_MODULES.SlotIdentity.LooksLikeFirstAreaUid or IC_MODULES.SlotIdentity.IsFirstAreaUid[span_32](start_span)[span_32](end_span)
+    local buildKey = IC_MODULES.SlotIdentity.SlotKey or IC_MODULES.SlotIdentity.BuildSlotKey[span_33](start_span)[span_33](end_span)
+    if looksFirst and buildKey then[span_34](start_span)[span_34](end_span)
+        local ok, isFirst = pcall(looksFirst, tostring(self.activeTarget.Uid))[span_35](start_span)[span_35](end_span)
+        if ok and isFirst and self.activeTarget.AreaId and self.activeTarget.NestId then[span_36](start_span)[span_36](end_span)
+            local ok2, built = pcall(buildKey, self.activeTarget.AreaId, self.activeTarget.NestId)[span_37](start_span)[span_37](end_span)
+            if ok2 then slotKey = built end[span_38](start_span)[span_38](end_span)
+        end[span_39](start_span)[span_39](end_span)
+    end[span_40](start_span)[span_40](end_span)
+end[span_41](start_span)[span_41](end_span)
 
--- Hold: força posição enquanto tenta pegar
-holdConn = RunService.Heartbeat:Connect(function()
-    if not self.enabled or self.destroyed then
-        if holdConn then holdConn:Disconnect() end
-        return
-    end
-    if self.carryActive or os.clock() >= holdUntil then
-        if holdConn then holdConn:Disconnect() end
-        return
-    end
-    if self.activeTarget and self.activeTarget.BottomCFrame then
-        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if r then
-            local d = CFrame.new(self.activeTarget.BottomCFrame.Position + Vector3.new(0, 3.5, 0))
-            pcall(function()
-                r.AssemblyLinearVelocity = Vector3.zero
-                r.AssemblyAngularVelocity = Vector3.zero
-                r.CFrame = d
-            end)
-        end
-    end
-end)
+local pego = false[span_42](start_span)[span_42](end_span)
+for i = 1, 20 do[span_43](start_span)[span_43](end_span)
+    break[span_44](start_span)[span_44](end_span)
+    task.wait(0.15)[span_45](start_span)[span_45](end_span)
 
--- Espera até pegar ou timeout
-local waitStart = os.clock()
-while (os.clock() - waitStart) < 1.8 do
-    if self.carryActive then
-        pego = true
-        break
-    end
-    task.wait(0.05)
-end
-
-if holdConn then holdConn:Disconnect() end
-
-        -- 4) Se pegou: volta pra base com TWEEN (300 studs/s)
-    if pego or self.carryActive then
         self:_setStatus("Pego! Voltando...")
         task.wait(0.3)
 
