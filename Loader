@@ -1371,7 +1371,7 @@ self:_requestCarry(current, true)
         end
     end)
 
-    task.delay(0.25, function()
+    task.delay(5, function()
         if not self.destroyed and self.enabled and not self.carryActive and self.phase == "hunting" then
             local char = LocalPlayer.Character
             local root = char and char:FindFirstChild("HumanoidRootPart")
