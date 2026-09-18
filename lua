@@ -2307,19 +2307,42 @@ pcall(function()
     end
 end)
 
--- 3) Espera o ragdoll ativar de verdade
+-- 3) Espera o ragdoll ativar + levanta do chão
+local char = LocalPlayer.Character
+local root = char and char:FindFirstChild("HumanoidRootPart")
+local hum = char and char:FindFirstChildOfClass("Humanoid")
+
 local tEnd0 = LocalPlayer:GetAttribute("RagdollEndTime") or 0
 local waited = 0
-while NatsuState.Running and waited < 8 do
+while NatsuState.Running and waited < 5 do
     local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
     if tEnd > tEnd0 + 0.3 then
         break
     end
-    task.wait(0.15)
-    waited = waited + 0.15
+    -- Levanta o personagem do chão durante o ragdoll
+    if root and hum then
+        pcall(function()
+            -- Sobe o personagem 5 studs e trava lá
+            local newPos = root.Position + Vector3.new(0, 5, 0)
+            root.CFrame = CFrame.new(newPos)
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            -- Evita cair pra baixo do chão
+            root.CustomPhysicalProperties = PhysicalProperties.new(0.01, 0.3, 0.5, 1, 1)
+        end)
+    end
+    task.wait(0.05)
+    waited = waited + 0.05
 end
 
-task.wait(0.3)
+-- Continua segurando em cima do chão
+if root and hum then
+    pcall(function()
+        root.CFrame = CFrame.new(root.Position + Vector3.new(0, 3, 0))
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+    end)
+				end
 
 -- ETAPA 4: Espera o ragdoll ativar (máximo 5s)
 natsuStatus.Text = "Esperando o ragdoll..."
