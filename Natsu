@@ -1384,12 +1384,11 @@ function InstantCarry:_startHunt()
 
     --     -- 4) Se pegou: volta pra base com TWEEN (300 studs/s)
     if pego or self.carryActive then
-        self:_setStatus("Pego! Voltando...")
-        task.wait(0.3)
+    self:_setStatus("Pego! Voltando...")
 
-        local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-        if not r or not h then self:_finish("No root"); return end
+    local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if not r or not h then self:_finish("No root"); return end
 
         -- Salva velocidade antiga
         local oldSpeed = Config.TweenSpeedMultiplier
