@@ -1186,13 +1186,28 @@ function InstantCarry:_schedule(forcePrimer)
     local primer = self:_choosePrimerEgg(target.Uid)
     if not primer then
         self:_setStatus("Waiting for Forest primer")
-        task.delay(0.25, function()
-            if not self.destroyed and self.enabled and not self.running then
-                self:_schedule()
-            end
-        end)
-        return
-    end
+            local conn
+    conn = RunService.Heartbeat:Connect(function()
+        if not self.enabled or self.destroyed or self.phase ~= "priming" then
+            if conn then conn:Disconnect() end
+            return
+        end
+        local tEndNow = LocalPlayer:GetAttribute("RagdollEndTime") or 0
+        if tEndNow > self.baitRagdollBaseline + 0.3 then
+            if conn then conn:Disconnect() end
+            task.spawn(function()
+                self:_startHunt()
+            end)
+        end
+    end)
+
+    task.delay(4, function()
+        if conn then conn:Disconnect() end
+        if not self.destroyed and self.enabled and self.phase == "priming" then
+            self:_finish("Primer carry timeout: retry")
+        end
+    end)
+end
 
     self.phase = "priming"
     self.baitRagdollBaseline = LocalPlayer:GetAttribute("RagdollEndTime") or 0
@@ -1329,11 +1344,11 @@ function InstantCarry:_startHunt()
     self.activeTarget = current
     self:_setStatus("Teleporting to target")
 	local dest = self:_resolveEggDestination(current, root, hum)
-	if not dest then self:_finish("Target destination unavailable"); return end
-	self:_enforceArrivalHold()
-	icSetAnchored(false)
-	self:_clearArrivalHold()
-    if not icTeleportHops(root, dest) then self:_finish("Teleport target failed") return end
+if not dest then self:_finish("Target destination unavailable"); return end
+
+icSetAnchored(false)
+self:_clearArrivalHold()
+icTeleportHops(root, dest)
 
     local ragdollOk = false
 local waitStart = os.clock()
@@ -1351,34 +1366,66 @@ if not ragdollOk then
     return
 end
 
-self:_setStatus("Securing target")
-self:_requestCarry(current, true)
-
-    task.spawn(function()
-        while not self.destroyed and self.enabled and not self.carryActive and self.phase == "hunting" do
-            local tEnd = LocalPlayer:GetAttribute("RagdollEndTime") or 0
-            local rawRemaining = tEnd - workspace:GetServerTimeNow()
-            if rawRemaining <= 0.85 then
-                local char = LocalPlayer.Character
-                local root = char and char:FindFirstChild("HumanoidRootPart")
-                if root and not icIsInSafeArea(root) then
-                    icTeleportRoot(root, CFrame.new(IC_SAFE_ZONE_POS) * root.CFrame.Rotation)
-                end
-                self:_finish("Ragdoll expiring: emergency abort")
-                break
+    -- 🔥 TELEPORTA E FORÇA POSIÇÃO (ragdoll não puxa de volta)
+    local teleportConn
+    teleportConn = RunService.Heartbeat:Connect(function()
+        if not self.enabled or self.destroyed or self.phase ~= "hunting" then
+            if teleportConn then teleportConn:Disconnect() end
+            return
+        end
+        if self.carryActive then
+            if teleportConn then teleportConn:Disconnect() end
+            return
+        end
+        if self.activeTarget and self.activeTarget.BottomCFrame then
+            local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if r then
+                local d = CFrame.new(self.activeTarget.BottomCFrame.Position + Vector3.new(0, 3.5, 0))
+                pcall(function()
+                    r.AssemblyLinearVelocity = Vector3.zero
+                    r.AssemblyAngularVelocity = Vector3.zero
+                    r.CFrame = d
+                    r.AssemblyLinearVelocity = Vector3.zero
+                    r.AssemblyAngularVelocity = Vector3.zero
+                end)
             end
-            task.wait(0.02)
         end
     end)
 
-    task.delay(5, function()
-        if not self.destroyed and self.enabled and not self.carryActive and self.phase == "hunting" then
-            local char = LocalPlayer.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            if root and not icIsInSafeArea(root) then
-                icTeleportRoot(root, CFrame.new(IC_SAFE_ZONE_POS) * root.CFrame.Rotation)
+    -- 🔥 TENTA PEGAR O OVO EM LOOP
+    task.spawn(function()
+        for i = 1, 30 do
+            if not self.enabled or self.destroyed or self.carryActive then break end
+            if self.activeTarget and self.activeTarget.Uid then
+                pcall(function()
+                    local slotKey = nil
+                    if IC_MODULES.SlotIdentity then
+                        local looksFirst = IC_MODULES.SlotIdentity.LooksLikeFirstAreaUid or IC_MODULES.SlotIdentity.IsFirstAreaUid
+                        local buildKey = IC_MODULES.SlotIdentity.SlotKey or IC_MODULES.SlotIdentity.BuildSlotKey
+                        if looksFirst and buildKey then
+                            local ok, isFirst = pcall(looksFirst, tostring(self.activeTarget.Uid))
+                            if ok and isFirst and self.activeTarget.AreaId and self.activeTarget.NestId then
+                                local ok2, built = pcall(buildKey, self.activeTarget.AreaId, self.activeTarget.NestId)
+                                if ok2 then slotKey = built end
+                            end
+                        end
+                    end
+                    icRequestFieldEggCarry(self.activeTarget.Uid, slotKey)
+                end)
             end
-            self:_finish("Carry timeout: return safe")
+            task.wait(0.1)
+        end
+    end)
+
+    -- Timeout de 5s
+    task.delay(5, function()
+        if teleportConn then teleportConn:Disconnect() end
+        if not self.destroyed and self.enabled and not self.carryActive and self.phase == "hunting" then
+            local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if r and not icIsInSafeArea(r) then
+                icTeleportRoot(r, CFrame.new(IC_SAFE_ZONE_POS) * r.CFrame.Rotation)
+            end
+            self:_finish("Carry timeout")
         end
     end)
 end
