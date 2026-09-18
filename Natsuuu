@@ -1383,36 +1383,44 @@ function InstantCarry:_startHunt()
         task.wait(0.15)
     end
 
-    -- 4) Se pegou: volta pra base (ANCORADO)
+        -- 4) Se pegou: volta pra base com TWEEN (300 studs/s)
     if pego or self.carryActive then
         self:_setStatus("Pego! Voltando...")
         task.wait(0.3)
 
         local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if not r then self:_finish("No root"); return end
+        local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if not r or not h then self:_finish("No root"); return end
+
+        -- Salva velocidade antiga
+        local oldSpeed = Config.TweenSpeedMultiplier
+        Config.TweenSpeedMultiplier = 30   -- 30 x 10 = 300 studs/s
 
         local safeCF = CFrame.new(IC_SAFE_ZONE_POS + Vector3.new(0, 3.5, 0))
         pcall(function()
-            r.Anchored = true
-            r.CFrame = safeCF
-            r.AssemblyLinearVelocity = Vector3.zero
-            r.AssemblyAngularVelocity = Vector3.zero
+            TweenMoveTo(r, h, safeCF, function()
+                return not self.enabled or self.destroyed
+            end, false)
         end)
 
-        -- Fica ancorado na base por 4 segundos
-        for i = 1, 80 do
+        -- Restaura velocidade
+        Config.TweenSpeedMultiplier = oldSpeed
+
+        -- Espera depositar (fica parado na base)
+        local depositStart = os.clock()
+        while (os.clock() - depositStart) < 4 do
             if self.destroyed then break end
-            pcall(function()
-                r.CFrame = safeCF
-                r.AssemblyLinearVelocity = Vector3.zero
-                r.AssemblyAngularVelocity = Vector3.zero
-            end)
+            if not self.carryActive then break end
+            local rr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if rr then
+                pcall(function()
+                    rr.AssemblyLinearVelocity = Vector3.zero
+                    rr.AssemblyAngularVelocity = Vector3.zero
+                    rr.CFrame = safeCF
+                end)
+            end
             task.wait(0.05)
         end
-
-        pcall(function()
-            r.Anchored = false
-        end)
 
         self:_setStatus("Na base")
         self:_finish("Return complete")
