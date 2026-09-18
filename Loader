@@ -929,8 +929,13 @@ function InstantCarry:_connect()
             self:_clearArrivalHold(state.Uid)
             if self.phase == "priming" then
                 self:_enterBaitWait()
+            elseif self.phase == "hunting" then
+                task.defer(function()
+                    if self.enabled and self.carryActive and self.carryUid == state.Uid then
+                        self:_returnToSafe()
+                    end
+                end)
             end
-            -- NÃO chama _returnToSafe aqui — o _startHunt cuida disso
         end
         return
     end
