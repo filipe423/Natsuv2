@@ -918,23 +918,22 @@ function InstantCarry:_connect()
     table.insert(self.connections, EggCmds.FieldShifted:Connect(function(record)
         if record and record.Uid then self.records[record.Uid] = record end
     end))
-    table.insert(self.connections, EggCmds.FieldGone:Connect(function(uid)
-        self.records[uid] = nil
-        if self.activeTarget and self.activeTarget.Uid == uid then
-            if self.carryActive and self.carryUid == uid then return end
+    table.insert(self.connections, EggCmds.CarryChanged:Connect(function(state)
+    if state.IsCarrying then
+        if self.running and self.activeTarget and state.Uid == self.activeTarget.Uid then
+            self.carryActive = true
+            self.carryUid = state.Uid
+            self.carryGeneration = self.carryGeneration + 1
+            self:_invalidateCarryWorker()
             self.carryAttemptToken = nil
-            self:_clearArrivalHold(uid)
-            local target = self.activeTarget
-            task.delay(0.65, function()
-                if self.destroyed or not self.enabled then return end
-                if self.carryActive and self.carryUid == uid then return end
-                if self.activeTarget == target and target.Uid == uid then
-                    self:_finish("Target removed")
-                end
-            end)
+            self:_clearArrivalHold(state.Uid)
+            if self.phase == "priming" then
+                self:_enterBaitWait()
+            end
+            -- NÃO chama _returnToSafe aqui — o _startHunt cuida disso
         end
-    end))
-end
+        return
+    end
 
 function InstantCarry:_replaceSnapshot(snapshot)
     table.clear(self.records)
@@ -1422,48 +1421,37 @@ end
         task.wait(0.15)
     end
 
-            if pego or self.carryActive then
-        self:_setStatus("Pego! Voltando...")
+                if pego or self.carryActive then
+        self:_setStatus("Pego! Voltando pra base...")
         
-        -- Espera 0.3s pro servidor confirmar
-        task.wait(0.3)
-        
+        -- Teleporta pra base IMEDIATAMENTE
         local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-        if not r then self:_finish("No root"); return end
-        
-        -- ANCORA (trava) na posição da base
-        local safeCF = CFrame.new(IC_SAFE_ZONE_POS + Vector3.new(0, 3.5, 0))
-        pcall(function()
-            r.Anchored = true
-            r.CFrame = safeCF
-            r.AssemblyLinearVelocity = Vector3.zero
-            r.AssemblyAngularVelocity = Vector3.zero
-        end)
-        
-        -- Fica ancorado até o carry cair (máx 5s)
-        local startTime = os.clock()
-        while (os.clock() - startTime) < 5 do
-            if not self.enabled or self.destroyed then break end
-            
+        if r then
+            local safeCF = CFrame.new(IC_SAFE_ZONE_POS + Vector3.new(0, 3.5, 0))
             pcall(function()
+                r.Anchored = true
                 r.CFrame = safeCF
             end)
             
-            if not self.carryActive then
-                -- Carry caiu, deposita feito
-                task.wait(0.2)
-                break
+            -- Fica ancorado na base por 4 segundos (tempo pro depósito)
+            for i = 1, 80 do
+                if self.destroyed then break end
+                pcall(function()
+                    r.CFrame = safeCF
+                    r.AssemblyLinearVelocity = Vector3.zero
+                    r.AssemblyAngularVelocity = Vector3.zero
+                end)
+                task.wait(0.05)
             end
-            task.wait(0.05)
+            
+            -- Desancora
+            pcall(function()
+                r.Anchored = false
+            end)
         end
         
-        -- Desancora
-        pcall(function()
-            r.Anchored = false
-        end)
-        
         self:_setStatus("Na base")
-        self:_finish("Safe return complete")
+        self:_finish("Return complete")
     else
         local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
         if r and not icIsInSafeArea(r) then
